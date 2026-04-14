@@ -8,13 +8,16 @@ const EPS = 0.012;
 const STEP = 2 / 3;
 const H = 1;
 
-/** 相邻贴纸之间的缝宽（世界单位），缝中露黑底 */
+/** 相邻彩色贴纸之间的缝宽（世界单位） */
 export const STICKER_GAP = 0.036;
 
 /**
  * 单格贴纸边长：3 列 + 2 道缝 = 2（面宽）
  */
 export const STICKER_SIZE = (2 - 2 * STICKER_GAP) / 3;
+
+/** 同一面上两贴纸相邻边之间的实际缝宽（中心距 `STEP` 与 `STICKER_SIZE` 之差） */
+export const STICKER_EDGE_GAP = STEP - STICKER_SIZE;
 
 /** 整面黑色衬底边长（略大于 2 防止边缘露白） */
 export const FACE_BACKING_SIZE = 2.002;

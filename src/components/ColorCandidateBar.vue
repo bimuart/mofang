@@ -21,7 +21,7 @@ defineEmits<{
       :class="{ 'chip--empty': c === null }"
       :style="
         c === null
-          ? { background: '#9ca3af', color: '#1a1a1a' }
+          ? { background: '#52525b', color: '#f4f4f5' }
           : { background: faceColors[c], color: '#111' }
       "
       @click="$emit('pick', c)"

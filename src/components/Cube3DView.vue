@@ -5,17 +5,27 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { isEmptyCell } from '../cube/cellValue';
 import type { FaceId } from '../cube/types';
 import {
-  FACE_BACKING_SIZE,
-  FACE_EULER,
-  STICKER_SIZE,
-  faceBackingCenter,
-  stickerCenter,
-} from '../cube/stickerLayout';
+  angleForFaceTurn,
+  axisForFaceTurn,
+  indicesForFaceLayer,
+  parseMoveToken,
+  remapSlotsAfterLayerRotation,
+} from '../cube/layerTurn';
+import { FACE_EULER, STICKER_EDGE_GAP, STICKER_SIZE, stickerCenter } from '../cube/stickerLayout';
 
 const props = defineProps<{
   facelets: string;
   faceColors: Record<FaceId, string>;
-  illegal: Set<number>;
+  /** 需红框高亮的贴纸（全部违规或当前选中约束） */
+  highlightIndices: Set<number>;
+  /** 不可点击编辑的格（如六个中心） */
+  lockedIndices?: ReadonlySet<number>;
+  /** 当前选中的贴纸索引，铺半透明天蓝壳 */
+  selectedIndex?: number | null;
+  /** 下一步还原转动提示，如 U 或 R2 */
+  nextHintMove?: string | null;
+  /** 贴纸与边框半透明模式 */
+  semiTransparent?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -32,29 +42,78 @@ let raf = 0;
 
 const stickerMeshes: THREE.Mesh[] = [];
 const borderRoots: THREE.Group[] = [];
+const selectionShells: THREE.Mesh[] = [];
+const cellRoots: THREE.Group[] = [];
 const disposableGeometries: THREE.BufferGeometry[] = [];
+
+let cubeRoot: THREE.Group | null = null;
+let hintRoot: THREE.Group | null = null;
 
 const planeGeometry = new THREE.PlaneGeometry(STICKER_SIZE, STICKER_SIZE);
 
-/** 六面共用：整面黑底，缝内露黑 */
-let faceBackingGeometry: THREE.PlaneGeometry | null = null;
-let faceBackingMaterial: THREE.MeshBasicMaterial | null = null;
-
+/** 贴纸四周常驻黑框 */
+let stickerBlackFrameMaterial: THREE.MeshBasicMaterial | null = null;
 let borderFlashMaterial: THREE.MeshBasicMaterial | null = null;
+let selectionShellMaterial: THREE.MeshBasicMaterial | null = null;
 
 let disposeThree: (() => void) | null = null;
 
 const half = STICKER_SIZE / 2;
 const frameT = Math.max(0.02, STICKER_SIZE * 0.042);
+/** 黑框线宽 = 贴纸间实际缝宽的一半，铺在缝内、不盖住贴纸 */
+const gapHalf = STICKER_EDGE_GAP / 2;
+/** 局部 +Z：黑框在贴纸平面略后；选中壳、红框在贴纸前 */
+const zBlackGapFrame = -0.002;
+const zSelectionShell = 0.0036;
 const zBorder = 0.006;
+
+const FACE_CENTER: Record<FaceId, THREE.Vector3> = {
+  U: new THREE.Vector3(0, 1.22, 0),
+  D: new THREE.Vector3(0, -1.22, 0),
+  R: new THREE.Vector3(1.22, 0, 0),
+  L: new THREE.Vector3(-1.22, 0, 0),
+  F: new THREE.Vector3(0, 0, 1.22),
+  B: new THREE.Vector3(0, 0, -1.22),
+};
 
 function pushGeom(g: THREE.BufferGeometry) {
   disposableGeometries.push(g);
   return g;
 }
 
-/** 四边红框，法线朝外略浮于贴纸之上；与非法状态 visibility 联动 */
-function buildErrorFrame(mat: THREE.MeshBasicMaterial): THREE.Group {
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * 贴在贴纸外侧缝里的黑框：线宽 `gapHalf`，不占彩色面；条带外沿跨一格中心距 `STICKER_SIZE + STICKER_EDGE_GAP`。
+ */
+function buildGapBlackFrame(mat: THREE.MeshBasicMaterial, zOffset: number): THREE.Group {
+  const root = new THREE.Group();
+  const span = STICKER_SIZE + STICKER_EDGE_GAP;
+  const dz = Math.max(gapHalf * 0.9, 0.006);
+
+  const geoH = pushGeom(new THREE.BoxGeometry(span, gapHalf, dz));
+  const geoV = pushGeom(new THREE.BoxGeometry(gapHalf, span, dz));
+
+  const top = new THREE.Mesh(geoH, mat);
+  top.position.set(0, half + gapHalf / 2, zOffset);
+  const bottom = new THREE.Mesh(geoH, mat);
+  bottom.position.set(0, -half - gapHalf / 2, zOffset);
+  const left = new THREE.Mesh(geoV, mat);
+  left.position.set(-half - gapHalf / 2, 0, zOffset);
+  const right = new THREE.Mesh(geoV, mat);
+  right.position.set(half + gapHalf / 2, 0, zOffset);
+
+  root.add(top, bottom, left, right);
+  for (const m of root.children) {
+    if (m instanceof THREE.Mesh) m.raycast = () => {};
+  }
+  return root;
+}
+
+/** 四边条边框（违规红框），压在贴纸外沿上 */
+function buildEdgeFrame(mat: THREE.MeshBasicMaterial, zOffset: number): THREE.Group {
   const root = new THREE.Group();
   const full = STICKER_SIZE;
   const midV = full - 2 * frameT;
@@ -64,15 +123,18 @@ function buildErrorFrame(mat: THREE.MeshBasicMaterial): THREE.Group {
   const geoV = pushGeom(new THREE.BoxGeometry(frameT, midV, dz));
 
   const top = new THREE.Mesh(geoH, mat);
-  top.position.set(0, half - frameT / 2, zBorder);
+  top.position.set(0, half - frameT / 2, zOffset);
   const bottom = new THREE.Mesh(geoH, mat);
-  bottom.position.set(0, -half + frameT / 2, zBorder);
+  bottom.position.set(0, -half + frameT / 2, zOffset);
   const left = new THREE.Mesh(geoV, mat);
-  left.position.set(-half + frameT / 2, 0, zBorder);
+  left.position.set(-half + frameT / 2, 0, zOffset);
   const right = new THREE.Mesh(geoV, mat);
-  right.position.set(half - frameT / 2, 0, zBorder);
+  right.position.set(half - frameT / 2, 0, zOffset);
 
   root.add(top, bottom, left, right);
+  for (const m of root.children) {
+    if (m instanceof THREE.Mesh) m.raycast = () => {};
+  }
   return root;
 }
 
@@ -86,55 +148,266 @@ function applyStickerAppearance(globalIdx: number) {
   const mat = mesh.material as THREE.MeshLambertMaterial;
   const ch = props.facelets[globalIdx] ?? '';
 
+  const semi = props.semiTransparent ?? false;
   if (isEmptyCell(ch)) {
-    mat.color.setHex(0x9ca3af);
-    mat.transparent = false;
-    mat.opacity = 1;
-    mat.depthWrite = true;
+    mat.color.setHex(0x52525b);
   } else {
     const fid = ch as FaceId;
     const base = props.faceColors[fid] ?? '#888888';
     mat.color.copy(hexToRgb(base));
-    mat.transparent = false;
-    mat.opacity = 1;
-    mat.depthWrite = true;
   }
+
+  const newSide = semi ? THREE.DoubleSide : THREE.FrontSide;
+  if (mat.side !== newSide || mat.transparent !== semi) {
+    mat.side = newSide;
+    mat.transparent = semi;
+    mat.needsUpdate = true;
+  }
+  mat.opacity = semi ? 0.42 : 1;
+  mat.depthWrite = !semi;
 
   const br = borderRoots[globalIdx];
   if (br) {
-    br.visible = props.illegal.has(globalIdx);
+    br.visible = props.highlightIndices.has(globalIdx);
+  }
+
+  const shell = selectionShells[globalIdx];
+  if (shell) {
+    shell.visible = props.selectedIndex === globalIdx;
   }
 }
 
-function buildCube(root: THREE.Group) {
-  faceBackingGeometry = new THREE.PlaneGeometry(FACE_BACKING_SIZE, FACE_BACKING_SIZE);
-  faceBackingMaterial = new THREE.MeshBasicMaterial({
-    color: 0x000000,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 1,
-  });
+/** 黑框、选中天蓝壳、红框条等共享材质（贴纸面在 applyStickerAppearance 中保持不透明） */
+function syncAuxiliaryMaterials() {
+  const semi = props.semiTransparent ?? false;
+  if (borderFlashMaterial) {
+    borderFlashMaterial.transparent = true;
+    borderFlashMaterial.depthWrite = true;
+  }
+  if (selectionShellMaterial) {
+    selectionShellMaterial.transparent = true;
+    selectionShellMaterial.opacity = 0.4;
+    selectionShellMaterial.depthWrite = false;
+  }
+  if (stickerBlackFrameMaterial) {
+    if (stickerBlackFrameMaterial.transparent !== semi) {
+      stickerBlackFrameMaterial.transparent = semi;
+      stickerBlackFrameMaterial.needsUpdate = true;
+    }
+    stickerBlackFrameMaterial.opacity = semi ? 0.35 : 1;
+    stickerBlackFrameMaterial.depthWrite = !semi;
+  }
+}
 
-  for (let face = 0; face < 6; face++) {
+function resetCellTransforms() {
+  for (let g = 0; g < 54; g++) {
+    const face = Math.floor(g / 9);
+    const rem = g % 9;
+    const row = Math.floor(rem / 3);
+    const col = rem % 3;
+    const [x, y, z] = stickerCenter(face, row, col);
     const euler = new THREE.Euler(
       FACE_EULER[face]![0],
       FACE_EULER[face]![1],
       FACE_EULER[face]![2],
     );
-    const back = new THREE.Mesh(faceBackingGeometry, faceBackingMaterial);
-    const [bx, by, bz] = faceBackingCenter(face);
-    back.position.set(bx, by, bz);
-    back.rotation.copy(euler);
-    root.add(back);
+    const cell = cellRoots[g];
+    if (!cell) continue;
+    cell.position.set(x, y, z);
+    cell.rotation.copy(euler);
+    cell.scale.set(1, 1, 1);
+  }
+}
+
+function permuteAfterMove(pieceAtNewSlot: number[]) {
+  const newCells: THREE.Group[] = [];
+  const newMeshes: THREE.Mesh[] = [];
+  const newBorders: THREE.Group[] = [];
+  const newShells: THREE.Mesh[] = [];
+  for (let s = 0; s < 54; s++) {
+    const j = pieceAtNewSlot[s]!;
+    newCells[s] = cellRoots[j]!;
+    newMeshes[s] = stickerMeshes[j]!;
+    newBorders[s] = borderRoots[j]!;
+    newShells[s] = selectionShells[j]!;
+    newMeshes[s]!.userData.faceletIndex = s;
+  }
+  for (let i = 0; i < 54; i++) {
+    cellRoots[i] = newCells[i]!;
+    stickerMeshes[i] = newMeshes[i]!;
+    borderRoots[i] = newBorders[i]!;
+    selectionShells[i] = newShells[i]!;
+  }
+}
+
+function clearHint() {
+  if (!hintRoot) return;
+  let sharedMat: THREE.MeshBasicMaterial | null = null;
+  while (hintRoot.children.length) {
+    const o = hintRoot.children[0]!;
+    hintRoot.remove(o);
+    if (o instanceof THREE.Mesh) {
+      if (!sharedMat) sharedMat = o.material as THREE.MeshBasicMaterial;
+      o.geometry.dispose();
+    }
+  }
+  sharedMat?.dispose();
+}
+
+/**
+ * 与 layer 动画一致：绕 `axis` 转 `deltaPhi`（弧度）的圆弧。
+ * P(φ) = C + R*(cos φ u0 + sin φ v0)，v0 = ω×u0，故 dP/dφ = ω×(P-C)，与右手系转角一致。
+ */
+class RotationHintArcCurve extends THREE.Curve<THREE.Vector3> {
+  constructor(
+    readonly center: THREE.Vector3,
+    readonly radius: number,
+    readonly u0: THREE.Vector3,
+    readonly v0: THREE.Vector3,
+    readonly phi0: number,
+    readonly deltaPhi: number,
+  ) {
+    super();
   }
 
-  borderFlashMaterial = new THREE.MeshBasicMaterial({
+  override getPoint(t: number, optionalTarget = new THREE.Vector3()) {
+    const phi = this.phi0 + this.deltaPhi * t;
+    return optionalTarget
+      .copy(this.center)
+      .addScaledVector(this.u0, this.radius * Math.cos(phi))
+      .addScaledVector(this.v0, this.radius * Math.sin(phi));
+  }
+
+  override getTangent(t: number, optionalTarget = new THREE.Vector3()) {
+    const phi = this.phi0 + this.deltaPhi * t;
+    return optionalTarget
+      .copy(this.u0)
+      .multiplyScalar(-this.radius * Math.sin(phi) * this.deltaPhi)
+      .addScaledVector(this.v0, this.radius * Math.cos(phi) * this.deltaPhi);
+  }
+}
+
+/** 在过该面中心、垂直于转动轴的平面内，取与 ω 正交的右手基 u0,v0（v0 = ω×u0） */
+function hintArcBasis(face: FaceId, omega: THREE.Vector3): {
+  center: THREE.Vector3;
+  u0: THREE.Vector3;
+  v0: THREE.Vector3;
+} {
+  const center = FACE_CENTER[face].clone();
+  const w = omega.clone().normalize();
+  const aux = Math.abs(w.x) < 0.55 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const u0 = new THREE.Vector3().crossVectors(aux, w).normalize();
+  const v0 = new THREE.Vector3().crossVectors(w, u0).normalize();
+  return { center, u0, v0 };
+}
+
+const HINT_ARC_RADIUS = 0.72;
+const HINT_TUBE_RADIUS = 0.058;
+/** 提示弧与箭头（深蓝） */
+const HINT_DEEP_BLUE = 0x0d47a1;
+const CONE_HEIGHT = 0.32;
+const CONE_RADIUS = 0.15;
+
+function buildHintArrows(face: FaceId, power: 0 | 1 | 2) {
+  clearHint();
+  if (!hintRoot) return;
+
+  const omega = axisForFaceTurn(face);
+  const deltaPhi = angleForFaceTurn(face, power);
+  const { center, u0, v0 } = hintArcBasis(face, omega);
+  const phi0 = Math.PI * 0.35;
+  const segments = power === 1 ? 64 : 40;
+
+  const arcCurve = new RotationHintArcCurve(
+    center,
+    HINT_ARC_RADIUS,
+    u0,
+    v0,
+    phi0,
+    deltaPhi,
+  );
+
+  const tubeGeom = new THREE.TubeGeometry(arcCurve, segments, HINT_TUBE_RADIUS, 12, false);
+
+  /** 与普通网格一致：参与深度缓冲，随视角被魔方体面正常遮挡 */
+  const hintMat = new THREE.MeshBasicMaterial({
+    color: HINT_DEEP_BLUE,
+    side: THREE.DoubleSide,
+  });
+
+  const tubeMesh = new THREE.Mesh(tubeGeom, hintMat);
+  hintRoot.add(tubeMesh);
+
+  /**
+   * ConeGeometry：局部 +Y 为从底圆指向锥尖。锥底（锥尾）贴在弧端点，锥尖沿 `tan` 朝外。
+   * `flip`：对 180° 起点反向，使两端锥尖均背离弧段朝外。
+   */
+  function addConeAtCurveT(tAnchor: number, flip: boolean) {
+    const g = new THREE.ConeGeometry(CONE_RADIUS, CONE_HEIGHT, 20);
+    const cone = new THREE.Mesh(g, hintMat);
+    const arcPoint = arcCurve.getPoint(tAnchor);
+    let tan = arcCurve.getTangent(tAnchor);
+    if (tan.lengthSq() < 1e-10) return;
+    tan.normalize();
+    if (flip) tan.multiplyScalar(-1);
+    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tan);
+    cone.position.copy(arcPoint.clone().add(tan.clone().multiplyScalar(CONE_HEIGHT / 2)));
+    hintRoot!.add(cone);
+  }
+
+  addConeAtCurveT(1, false);
+  if (power === 1) {
+    addConeAtCurveT(0, true);
+  }
+}
+
+function updateTurnHint() {
+  const raw = props.nextHintMove?.trim();
+  if (!raw || !hintRoot) {
+    clearHint();
+    return;
+  }
+  const parsed = parseMoveToken(raw);
+  if (!parsed) {
+    clearHint();
+    return;
+  }
+  buildHintArrows(parsed.face, parsed.power);
+}
+
+function buildCube(root: THREE.Group) {
+  const blackFrameMat = new THREE.MeshBasicMaterial({
+    color: 0x0a0a0a,
+    transparent: false,
+    opacity: 1,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -0.5,
+    polygonOffsetUnits: -0.5,
+  });
+  stickerBlackFrameMaterial = blackFrameMat;
+
+  const flashMat = new THREE.MeshBasicMaterial({
     color: 0xff0520,
     transparent: true,
     opacity: 1,
     depthTest: true,
     depthWrite: false,
   });
+  borderFlashMaterial = flashMat;
+
+  const shellMat = new THREE.MeshBasicMaterial({
+    color: 0x87ceeb,
+    transparent: true,
+    opacity: 0.4,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  });
+  selectionShellMaterial = shellMat;
 
   for (let face = 0; face < 6; face++) {
     const euler = new THREE.Euler(
@@ -149,20 +422,33 @@ function buildCube(root: THREE.Group) {
         const mesh = new THREE.Mesh(planeGeometry, mat);
         mesh.userData.faceletIndex = g;
 
-        const border = buildErrorFrame(borderFlashMaterial);
+        const blackFrame = buildGapBlackFrame(blackFrameMat, zBlackGapFrame);
+
+        const border = buildEdgeFrame(flashMat, zBorder);
         border.visible = false;
+
+        const shell = new THREE.Mesh(planeGeometry, shellMat);
+        shell.position.z = zSelectionShell;
+        shell.visible = false;
+        shell.raycast = () => {};
 
         const cell = new THREE.Group();
         cell.add(mesh);
+        cell.add(blackFrame);
+        cell.add(shell);
         cell.add(border);
 
         const [x, y, z] = stickerCenter(face, row, col);
         cell.position.set(x, y, z);
         cell.rotation.copy(euler);
 
+        mesh.renderOrder = 1;
+
         root.add(cell);
         stickerMeshes[g] = mesh;
         borderRoots[g] = border;
+        selectionShells[g] = shell;
+        cellRoots[g] = cell;
         applyStickerAppearance(g);
       }
     }
@@ -173,7 +459,89 @@ function syncAllStickers() {
   for (let i = 0; i < 54; i++) {
     applyStickerAppearance(i);
   }
+  syncAuxiliaryMaterials();
 }
+
+let animating = false;
+
+function animateMove(move: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!scene || !cubeRoot) {
+      reject(new Error('scene not ready'));
+      return;
+    }
+    const parsed = parseMoveToken(move.trim());
+    if (!parsed) {
+      reject(new Error('bad move'));
+      return;
+    }
+    if (animating) {
+      reject(new Error('busy'));
+      return;
+    }
+    animating = true;
+    const { face, power } = parsed;
+    const indices = indicesForFaceLayer(face);
+    const axis = axisForFaceTurn(face).normalize();
+    const angle = angleForFaceTurn(face, power);
+    const qEnd = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+
+    const pivot = new THREE.Group();
+    scene.add(pivot);
+
+    for (const i of indices) {
+      const cell = cellRoots[i];
+      if (cell) pivot.attach(cell);
+    }
+
+    const t0 = performance.now();
+    const duration = 420;
+
+    function frame() {
+      if (!pivot.parent || !scene || !cubeRoot) {
+        animating = false;
+        return;
+      }
+      const t = Math.min(1, (performance.now() - t0) / duration);
+      const e = easeInOutCubic(t);
+      pivot.quaternion.slerpQuaternions(new THREE.Quaternion(), qEnd, e);
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        finish();
+      }
+    }
+
+    function finish() {
+      pivot.quaternion.copy(qEnd);
+      for (const i of indices) {
+        const cell = cellRoots[i];
+        if (cell) cubeRoot!.attach(cell);
+      }
+      scene!.remove(pivot);
+
+      const pieceAtNew = remapSlotsAfterLayerRotation(indices, qEnd);
+      permuteAfterMove(pieceAtNew);
+      animating = false;
+      resolve();
+    }
+
+    frame();
+  });
+}
+
+function resetLayout() {
+  resetCellTransforms();
+  for (let i = 0; i < 54; i++) {
+    stickerMeshes[i]!.userData.faceletIndex = i;
+  }
+  syncAllStickers();
+}
+
+defineExpose({
+  animateMove,
+  resetLayout,
+});
 
 onMounted(() => {
   const el = containerRef.value;
@@ -218,9 +586,15 @@ onMounted(() => {
   rim.position.set(0, -4, 5);
   scene.add(rim);
 
-  const group = new THREE.Group();
-  buildCube(group);
-  scene.add(group);
+  cubeRoot = new THREE.Group();
+  cubeRoot.renderOrder = 0;
+  buildCube(cubeRoot);
+  syncAuxiliaryMaterials();
+  scene.add(cubeRoot);
+
+  hintRoot = new THREE.Group();
+  scene.add(hintRoot);
+  updateTurnHint();
 
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
@@ -238,6 +612,7 @@ onMounted(() => {
     const dy = ev.clientY - downY;
     if (dx * dx + dy * dy > 36) return;
     if (!renderer || !camera) return;
+    if (animating) return;
 
     const rect = renderer.domElement.getBoundingClientRect();
     ndc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
@@ -247,6 +622,7 @@ onMounted(() => {
     if (hits.length > 0) {
       const idx = hits[0]!.object.userData.faceletIndex;
       if (typeof idx === 'number') {
+        if (props.lockedIndices?.has(idx)) return;
         emit('stickerClick', idx);
       }
     }
@@ -265,20 +641,20 @@ onMounted(() => {
   });
   ro.observe(el);
 
-  /** 周期 1s：边框透明度正弦闪烁 */
+  /** 周期约 1s：违规红框透明度正弦闪烁 */
   function tick() {
     raf = requestAnimationFrame(tick);
     controls?.update();
 
     if (borderFlashMaterial) {
-      if (props.illegal.size > 0) {
+      if (props.highlightIndices.size > 0) {
         const phase = (performance.now() / 1000) * Math.PI * 2;
-        borderFlashMaterial.opacity = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(phase));
+        borderFlashMaterial.opacity =
+          0.3 + 0.7 * (0.5 + 0.5 * Math.sin(phase));
       } else {
         borderFlashMaterial.opacity = 1;
       }
     }
-
     if (renderer && scene && camera) {
       renderer.render(scene, camera);
     }
@@ -292,12 +668,14 @@ onMounted(() => {
     renderer?.domElement.removeEventListener('pointerup', onPointerUp);
     controls?.dispose();
     planeGeometry.dispose();
-    faceBackingGeometry?.dispose();
-    faceBackingGeometry = null;
-    faceBackingMaterial?.dispose();
-    faceBackingMaterial = null;
+    stickerBlackFrameMaterial?.dispose();
+    stickerBlackFrameMaterial = null;
     borderFlashMaterial?.dispose();
     borderFlashMaterial = null;
+    selectionShellMaterial?.dispose();
+    selectionShellMaterial = null;
+
+    clearHint();
 
     for (const m of stickerMeshes) {
       const mat = m.material;
@@ -305,6 +683,8 @@ onMounted(() => {
     }
     stickerMeshes.length = 0;
     borderRoots.length = 0;
+    selectionShells.length = 0;
+    cellRoots.length = 0;
 
     for (const g of disposableGeometries) {
       g.dispose();
@@ -319,6 +699,8 @@ onMounted(() => {
     scene = null;
     camera = null;
     controls = null;
+    cubeRoot = null;
+    hintRoot = null;
     disposeThree = null;
   };
 });
@@ -328,7 +710,26 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => [props.facelets, [...props.illegal].sort().join(',')] as const,
+  () =>
+    [
+      props.facelets,
+      [...props.highlightIndices].sort().join(','),
+      props.selectedIndex ?? '',
+    ] as const,
+  () => {
+    syncAllStickers();
+  },
+);
+
+watch(
+  () => props.nextHintMove,
+  () => {
+    updateTurnHint();
+  },
+);
+
+watch(
+  () => props.semiTransparent,
   () => {
     syncAllStickers();
   },
