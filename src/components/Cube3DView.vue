@@ -26,7 +26,13 @@ const props = defineProps<{
   nextHintMove?: string | null;
   /** 贴纸与边框半透明模式 */
   semiTransparent?: boolean;
+  /** 半透明开启时贴纸面与黑框的不透明度（0–1），默认与原先贴纸一致 */
+  stickerOpacity?: number;
 }>();
+
+function clamp01(n: number): number {
+  return Math.min(1, Math.max(0.05, n));
+}
 
 const emit = defineEmits<{
   stickerClick: [index: number];
@@ -149,6 +155,7 @@ function applyStickerAppearance(globalIdx: number) {
   const ch = props.facelets[globalIdx] ?? '';
 
   const semi = props.semiTransparent ?? false;
+  const alpha = semi ? clamp01(props.stickerOpacity ?? 0.42) : 1;
   if (isEmptyCell(ch)) {
     mat.color.setHex(0x52525b);
   } else {
@@ -163,7 +170,7 @@ function applyStickerAppearance(globalIdx: number) {
     mat.transparent = semi;
     mat.needsUpdate = true;
   }
-  mat.opacity = semi ? 0.42 : 1;
+  mat.opacity = alpha;
   mat.depthWrite = !semi;
 
   const br = borderRoots[globalIdx];
@@ -180,6 +187,7 @@ function applyStickerAppearance(globalIdx: number) {
 /** 黑框、选中天蓝壳、红框条等共享材质（贴纸面在 applyStickerAppearance 中保持不透明） */
 function syncAuxiliaryMaterials() {
   const semi = props.semiTransparent ?? false;
+  const alpha = semi ? clamp01(props.stickerOpacity ?? 0.42) : 1;
   if (borderFlashMaterial) {
     borderFlashMaterial.transparent = true;
     borderFlashMaterial.depthWrite = true;
@@ -194,8 +202,9 @@ function syncAuxiliaryMaterials() {
       stickerBlackFrameMaterial.transparent = semi;
       stickerBlackFrameMaterial.needsUpdate = true;
     }
-    stickerBlackFrameMaterial.opacity = semi ? 0.35 : 1;
-    stickerBlackFrameMaterial.depthWrite = !semi;
+    stickerBlackFrameMaterial.opacity = alpha;
+    /** 缝内黑线始终写深度：半透明贴纸不写深度时，若此处也不写会被错误地「盖没」；写深度后仍可被更近的面正确遮挡 */
+    stickerBlackFrameMaterial.depthWrite = true;
   }
 }
 
@@ -729,7 +738,7 @@ watch(
 );
 
 watch(
-  () => props.semiTransparent,
+  () => [props.semiTransparent, props.stickerOpacity] as const,
   () => {
     syncAllStickers();
   },

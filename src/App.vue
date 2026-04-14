@@ -238,6 +238,10 @@ async function nextSolutionStep() {
 }
 
 const semiTransparent = ref(false);
+/** 半透明模式下贴纸与黑缝边框共用不透明度（0.1–1） */
+const stickerOpacity = ref(0.42);
+
+const opacityPercent = computed(() => Math.round(stickerOpacity.value * 100));
 
 /** 用户改色或载入新状态后：清空已算好的还原序列，并把 3D 贴纸位姿恢复为与索引一致 */
 function invalidateSolutionAndReset3D() {
@@ -296,13 +300,31 @@ function invalidateSolutionAndReset3D() {
           <p class="hint">
             <strong>拖拽</strong>旋转视角（仅移动相机）；<strong>点击</strong>非中心贴纸后在下方选色（含「空」）；中心块固定不可改。填齐后可「获取解法」并按「下一步」播放单层旋转（含中心块随动）；蓝色箭头提示下一步转动方向。
           </p>
-          <button
-            type="button"
-            class="btn-semi"
-            :class="{ 'btn-semi--active': semiTransparent }"
-            :aria-pressed="semiTransparent"
-            @click="semiTransparent = !semiTransparent"
-          >{{ semiTransparent ? '不透明' : '半透明' }}</button>
+          <div class="semi-controls">
+            <button
+              type="button"
+              class="btn-semi"
+              :class="{ 'btn-semi--active': semiTransparent }"
+              :aria-pressed="semiTransparent"
+              @click="semiTransparent = !semiTransparent"
+            >{{ semiTransparent ? '不透明' : '半透明' }}</button>
+            <label v-if="semiTransparent" class="semi-opacity">
+              <span class="semi-opacity__label">透明度</span>
+              <input
+                v-model.number="stickerOpacity"
+                class="semi-opacity__range"
+                type="range"
+                min="0.1"
+                max="1"
+                step="0.02"
+                aria-valuemin="0.1"
+                aria-valuemax="1"
+                :aria-valuenow="stickerOpacity"
+                aria-label="贴纸与黑框不透明度"
+              />
+              <span class="semi-opacity__value" aria-hidden="true">{{ opacityPercent }}</span>
+            </label>
+          </div>
         </div>
         <Cube3DView
           ref="cube3dRef"
@@ -313,6 +335,7 @@ function invalidateSolutionAndReset3D() {
           :selected-index="selectedCell"
           :next-hint-move="nextHintMove"
           :semi-transparent="semiTransparent"
+          :sticker-opacity="stickerOpacity"
           @sticker-click="onStickerClick"
         />
 
@@ -558,6 +581,38 @@ function invalidateSolutionAndReset3D() {
 .view-3d__head .hint {
   flex: 1 1 14rem;
   margin: 0;
+}
+
+.semi-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.85rem;
+}
+
+.semi-opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: #555;
+  user-select: none;
+}
+
+.semi-opacity__label {
+  white-space: nowrap;
+}
+
+.semi-opacity__range {
+  width: min(9rem, 32vw);
+  vertical-align: middle;
+  accent-color: #6366f1;
+}
+
+.semi-opacity__value {
+  min-width: 2.25rem;
+  font-variant-numeric: tabular-nums;
+  color: #444;
 }
 
 .btn-semi {
