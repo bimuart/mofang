@@ -3,7 +3,8 @@ import { computed, nextTick, ref } from 'vue';
 import Cube from 'cubejs';
 import ColorCandidateBar from './components/ColorCandidateBar.vue';
 import Cube3DView from './components/Cube3DView.vue';
-import { defaultCandidates, EMPTY_FACELET, isEmptyCell } from './cube/cellValue';
+import { computeQuantityOnlyCandidates } from './cube/candidateConstraints';
+import { EMPTY_FACELET, isEmptyCell } from './cube/cellValue';
 import { CENTER_INDICES } from './cube/faceletGeometry';
 import {
   buildConstraintRows,
@@ -20,7 +21,48 @@ const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
 const facelets = ref(solvedString());
 
 const selectedCell = ref<number | null>(null);
-const candidates = defaultCandidates();
+
+/** 当前选中格的候选色条：空格为数量约束下的子集；已填格为当前色 +「空」以清除 */
+const pickerBarCandidates = computed((): readonly (FaceId | null)[] => {
+  const idx = selectedCell.value;
+  if (idx === null) return [];
+  const all = computeQuantityOnlyCandidates(facelets.value);
+  const row = all[idx];
+  if (!row) return [];
+  const ch = facelets.value[idx]!;
+  if (!isEmptyCell(ch)) return [...row, null];
+  return [...row];
+});
+
+const canAutoFillUnique = computed(() => {
+  const all = computeQuantityOnlyCandidates(facelets.value);
+  for (let i = 0; i < 54; i++) {
+    if (LOCKED_CENTER.has(i)) continue;
+    if (!isEmptyCell(facelets.value[i]!)) continue;
+    if (all[i]!.length === 1) return true;
+  }
+  return false;
+});
+
+function autoFillUniqueCandidates() {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const all = computeQuantityOnlyCandidates(facelets.value);
+    const arr = facelets.value.split('');
+    for (let i = 0; i < 54; i++) {
+      if (LOCKED_CENTER.has(i)) continue;
+      if (!isEmptyCell(arr[i]!)) continue;
+      const c = all[i];
+      if (c && c.length === 1) {
+        arr[i] = c[0]!;
+        changed = true;
+      }
+    }
+    facelets.value = arr.join('');
+  }
+  invalidateSolutionAndReset3D();
+}
 
 const FACE_COLORS: Record<FaceId, string> = {
   U: '#ffffff',
@@ -265,6 +307,15 @@ function invalidateSolutionAndReset3D() {
       <button type="button" @click="setSolved">还原态</button>
       <button type="button" @click="setRandomLegal">随机合法态</button>
       <button type="button" class="muted" @click="clearExceptCenters">清空</button>
+      <button
+        type="button"
+        class="toolbar__primary"
+        :disabled="!canAutoFillUnique"
+        title="按色数与棱/角块约束，填满当前仅有一种候选颜色的空格（可重复传播）"
+        @click="autoFillUniqueCandidates"
+      >
+        填充唯一候选
+      </button>
       <button type="button" class="muted" @click="exampleCornerTwist">示例：角块乱向</button>
       <button
         type="button"
@@ -346,7 +397,7 @@ function invalidateSolutionAndReset3D() {
           </div>
           <p class="picker__sub">候选颜色（「空」= 未填，灰色）</p>
           <ColorCandidateBar
-            :candidates="candidates"
+            :candidates="pickerBarCandidates"
             :face-colors="FACE_COLORS"
             @pick="applyPick"
           />
