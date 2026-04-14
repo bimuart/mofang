@@ -68,7 +68,7 @@ function cornerOri(t: readonly [FaceId, FaceId, FaceId], j: number): number | nu
  * 按 CORNER_FACELETS 槽位顺序 (0,1,2) 校验手性：至少两格已有颜色时可判定。
  * - 三格齐全：须为某一角块身份的合法循环置换，且 multiset 未被其它已填角占用。
  * - 恰两格有颜色：第三格用该角块身份唯一确定，若存在某身份 j 使补全后 `cornerOri(full,j) !== null` 则通过。
- * - 少于一格：无法由手性单独约束，返回 true（由调用方做其它过滤）。
+ * - 少于一格有颜色：手性未定，返回 true（不限制为「该角位还原块」三色；打乱后首格可为任意色）。
  */
 function cornerSlotChiralityOk(
   slotTriple: readonly [FaceId | null, FaceId | null, FaceId | null],
@@ -258,12 +258,8 @@ export function computeQuantityOnlyCandidates(facelets: string): readonly (reado
           cSlot === 2 ? c : readSlot(2),
         ];
 
-        let filled = 0;
-        for (let m = 0; m < 3; m++) {
-          if (slotTriple[m] !== null && isFaceId(slotTriple[m]!)) filled++;
-        }
-        if (filled < 2 && !REF_CORNER[cPos].includes(c)) return false;
-
+        // 仅一格有颜色时：该角可能是任意角块朝向，六种色均可（在色数/对色等已滤前提下）；
+        // 不得假设「物理角位 cPos」只对应还原态 REF_CORNER[cPos] 那一块的三色。
         return cornerSlotChiralityOk(slotTriple, usedCK);
       });
     } else if (ei) {
