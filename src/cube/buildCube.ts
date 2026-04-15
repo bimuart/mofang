@@ -24,7 +24,7 @@ const CENTER_LETTER_TO_INDEX: Record<FaceId, number> = {
   B: 5,
 };
 
-/** 与 cubejs `cornerColor` / legality `REF_CORNER` 一致 */
+/** 与 cubejs `cornerColor` / cubeConstraints `REF_CORNER` 一致 */
 const REF_CORNER: readonly (readonly FaceId[])[] = [
   ['U', 'R', 'F'],
   ['U', 'F', 'L'],
@@ -36,7 +36,7 @@ const REF_CORNER: readonly (readonly FaceId[])[] = [
   ['D', 'R', 'B'],
 ] as const;
 
-/** 与 cubejs `edgeColor` / legality `REF_EDGE` 一致 */
+/** 与 cubejs `edgeColor` / cubeConstraints `REF_EDGE` 一致 */
 const REF_EDGE: readonly (readonly FaceId[])[] = [
   ['U', 'R'],
   ['U', 'F'],
@@ -56,7 +56,7 @@ function isFaceId(c: string): c is FaceId {
   return (FACES as readonly string[]).includes(c);
 }
 
-/** 槽位顺序下三色是否为角块 j 的合法循环扭转（与 cubejs / legality 一致） */
+/** 槽位顺序下三色是否为角块 j 的合法循环扭转（与 cubejs / cubeConstraints 一致） */
 function isCornerCyclicTwist(t: readonly [FaceId, FaceId, FaceId], pieceJ: number): boolean {
   const ref = REF_CORNER[pieceJ]!;
   for (let ori = 0; ori < 3; ori++) {
@@ -112,7 +112,7 @@ function cornerPieceAndOriFromFullSlotOrder(
  * 解析单角槽 `slotIndex`：至少两格为有效面色时可唯一确定（两格时第三色由块身份推出）。
  * 无法唯一确定或非法时返回 null。
  */
-function resolveCornerSlot(facelets54: string, slotIndex: number): { j: number; ori: number } | null {
+export function resolveCornerSlot(facelets54: string, slotIndex: number): { j: number; ori: number } | null {
   const [ia, ib, ic] = CORNER_FACELETS[slotIndex]!;
   const raw = [facelets54[ia]!, facelets54[ib]!, facelets54[ic]!] as const;
 

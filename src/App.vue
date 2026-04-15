@@ -9,10 +9,14 @@ import { CENTER_INDICES } from './cube/faceletGeometry';
 import { buildCube } from './cube/buildCube';
 import {
   buildConstraintRows,
+  enumerateCornerFillCubeStates,
+  enumerateEdgeFillCubeStates,
   solvedString,
   validateLegality,
   type ConstraintGroupId,
-} from './cube/legality';
+  type CornerFillEnumerationEntry,
+  type EdgeFillEnumerationEntry,
+} from './cube/cubeConstraints';
 import { splitAlgorithm } from './cube/layerTurn';
 import type { FaceId } from './cube/types';
 
@@ -52,16 +56,18 @@ function undoFacelets() {
 
 const selectedCell = ref<number | null>(null);
 
-/** 当前选中格的候选色条：空格为数量约束下的子集；已填格为当前色 +「空」以清除 */
+/** 未填格六种面色；已填格为该色（见 `candidateConstraints`） */
+const faceletConvergedCandidates = computed(() => computeQuantityOnlyCandidates(facelets.value));
+
+/** 当前选中格的候选色条（「空」= 未填） */
 const pickerBarCandidates = computed((): readonly (FaceId | null)[] => {
   const idx = selectedCell.value;
   if (idx === null) return [];
-  const all = computeQuantityOnlyCandidates(facelets.value);
-  const row = all[idx];
-  if (!row) return [];
+  const row = faceletConvergedCandidates.value[idx];
+  if (!row || row.length === 0) return [];
   const ch = facelets.value[idx]!;
   if (!isEmptyCell(ch)) return [...row, null];
-  return [...row];
+  return [...row, null];
 });
 
 const canAutoFillUnique = computed(() => {
@@ -348,6 +354,113 @@ function invalidateSolutionAndReset3D() {
     cube3dRef.value?.resetLayout();
   });
 }
+
+const edgeEnumEntries = ref<EdgeFillEnumerationEntry[]>([]);
+const edgeEnumError = ref<string | null>(null);
+const selectedEdgeEnumIndex = ref<number | null>(null);
+
+const edgeEnumDisplayText = computed(() => {
+  if (edgeEnumError.value) return edgeEnumError.value;
+  const list = edgeEnumEntries.value;
+  const n = list.length;
+  if (n === 0) {
+    return '（尚无枚举结果：点击「枚举棱补全」；须每个棱槽至少一格为有效面色。）';
+  }
+  let out = `枚举数量: ${n}\n\n`;
+  for (let i = 0; i < n; i++) {
+    const e = list[i]!;
+    out += `--- #${i} ---\n${JSON.stringify({ state: e.state, facelets54: e.facelets54 }, null, 2)}\n\n`;
+  }
+  return out;
+});
+
+function runEdgeEnumeration() {
+  edgeEnumError.value = null;
+  try {
+    const out = enumerateEdgeFillCubeStates(facelets.value);
+    edgeEnumEntries.value = out;
+    selectedEdgeEnumIndex.value = out.length > 0 ? 0 : null;
+  } catch (e) {
+    edgeEnumEntries.value = [];
+    selectedEdgeEnumIndex.value = null;
+    edgeEnumError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function applySelectedEdgeEnumeration() {
+  const idx = selectedEdgeEnumIndex.value;
+  const list = edgeEnumEntries.value;
+  if (idx === null || idx < 0 || idx >= list.length) return;
+  pushUndoSnapshot();
+  facelets.value = list[idx]!.facelets54;
+  selectedCell.value = null;
+}
+
+const cornerEnumEntries = ref<CornerFillEnumerationEntry[]>([]);
+const cornerEnumError = ref<string | null>(null);
+const selectedCornerEnumIndex = ref<number | null>(null);
+
+const cornerEnumDisplayText = computed(() => {
+  if (cornerEnumError.value) return cornerEnumError.value;
+  const list = cornerEnumEntries.value;
+  const n = list.length;
+  if (n === 0) {
+    return '（尚无枚举结果：点击「枚举角补全」；须每个角槽至少一格为有效面色。）';
+  }
+  let out = `枚举数量: ${n}\n\n`;
+  for (let i = 0; i < n; i++) {
+    const e = list[i]!;
+    out += `--- #${i + 1} ---\n${JSON.stringify({ state: e.state, facelets54: e.facelets54 }, null, 2)}\n\n`;
+  }
+  return out;
+});
+
+function runCornerEnumeration() {
+  cornerEnumError.value = null;
+  try {
+    const out = enumerateCornerFillCubeStates(facelets.value);
+    cornerEnumEntries.value = out;
+    selectedCornerEnumIndex.value = out.length > 0 ? 0 : null;
+  } catch (e) {
+    cornerEnumEntries.value = [];
+    selectedCornerEnumIndex.value = null;
+    cornerEnumError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function applySelectedCornerEnumeration() {
+  const idx = selectedCornerEnumIndex.value;
+  const list = cornerEnumEntries.value;
+  if (idx === null || idx < 0 || idx >= list.length) return;
+  pushUndoSnapshot();
+  facelets.value = list[idx]!.facelets54;
+  selectedCell.value = null;
+}
+
+const candidateDialogRef = ref<HTMLDialogElement | null>(null);
+const candidateMatrixText = ref('');
+const candidateDialogError = ref<string | null>(null);
+
+function openFaceletCandidateDialog() {
+  candidateDialogError.value = null;
+  try {
+    const matrix = computeQuantityOnlyCandidates(facelets.value);
+    candidateMatrixText.value = JSON.stringify(matrix, null, 2);
+    candidateDialogRef.value?.showModal();
+  } catch (e) {
+    candidateDialogError.value = e instanceof Error ? e.message : String(e);
+    candidateMatrixText.value = '';
+    candidateDialogRef.value?.showModal();
+  }
+}
+
+function closeFaceletCandidateDialog() {
+  candidateDialogRef.value?.close();
+}
+
+function onCandidateDialogBackdropClick(ev: MouseEvent) {
+  if (ev.target === candidateDialogRef.value) closeFaceletCandidateDialog();
+}
 </script>
 
 <template>
@@ -355,7 +468,7 @@ function invalidateSolutionAndReset3D() {
     <header class="header">
       <h1>3×3 魔方合法性校验</h1>
       <p class="lead">
-        依据色数守恒、中心唯一、棱/角块身份与唯一性、几何一致（手性/朝向）、以及角扭转 mod 3、棱翻转偶性、置换奇偶（约束 A–D）检验；全局项由 `buildCube` 解析（未决为 -1）。右侧可逐项查看状态，点击某项可单独高亮相关贴纸。
+        依据色数守恒、中心唯一、棱/角块身份与唯一性、几何一致（手性/朝向）、以及角扭转 mod 3（完全/非完全填充分支）、棱翻转偶性（完全/非完全）、置换奇偶（约束 A–D）检验；全局项由 `buildCube` 解析（未决为 -1）。右侧可逐项查看状态，点击某项可单独高亮相关贴纸。
       </p>
     </header>
 
@@ -380,6 +493,13 @@ function invalidateSolutionAndReset3D() {
         @click="autoFillUniqueCandidates"
       >
         填充唯一候选
+      </button>
+      <button
+        type="button"
+        title="几何 + 色数 + 棱枚举（翻转偶性）+ 角槽 (j,ori) 收敛；结果为新窗口内 JSON"
+        @click="openFaceletCandidateDialog"
+      >
+        收敛候选色…
       </button>
       <button type="button" class="muted" @click="exampleCornerTwist">示例：角块乱向</button>
       <button
@@ -460,7 +580,9 @@ function invalidateSolutionAndReset3D() {
             <span>已选格 <strong>#{{ selectedCell }}</strong></span>
             <button type="button" class="picker__close" @click="clearSelection">关闭</button>
           </div>
-          <p class="picker__sub">候选颜色（「空」= 未填，灰色）</p>
+          <p class="picker__sub">
+            候选颜色（<code>computeQuantityOnlyCandidates</code>；未填格为六种面色，与右侧合法性中的棱角局部等独立）（「空」= 未填，灰色）
+          </p>
           <ColorCandidateBar
             :candidates="pickerBarCandidates"
             :face-colors="FACE_COLORS"
@@ -554,6 +676,104 @@ function invalidateSolutionAndReset3D() {
         </p>
       </aside>
     </div>
+
+    <section class="edge-enum card" aria-label="棱块补全枚举">
+      <h2 class="cube-json__title"><code>enumerateEdgeFillCubeStates</code></h2>
+      <p class="edge-enum__hint">
+        每个几何棱槽（两格）至少一格为有效面色时，枚举补全另一格；结果会去掉违反「约束 C · 棱翻转偶数」的方案（与合法性校验一致）。下方为各方案的
+        <code>CubeStateJSON</code> 与补全后的 54 位串。选择方案后可一键写回左侧贴纸（含 3D）。
+      </p>
+      <div class="edge-enum__actions">
+        <button type="button" class="toolbar__primary" @click="runEdgeEnumeration">枚举棱补全</button>
+        <label v-if="edgeEnumEntries.length > 0" class="edge-enum__select">
+          <span class="edge-enum__select-label">选中方案</span>
+          <select v-model.number="selectedEdgeEnumIndex" class="edge-enum__select-input">
+            <option v-for="(_, i) in edgeEnumEntries" :key="i" :value="i">#{{ i + 1 }}</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="selectedEdgeEnumIndex === null || edgeEnumEntries.length === 0"
+          @click="applySelectedEdgeEnumeration"
+        >
+          应用到魔方
+        </button>
+      </div>
+      <textarea
+        class="edge-enum__textarea"
+        readonly
+        rows="14"
+        spellcheck="false"
+        aria-label="棱补全枚举结果"
+        :value="edgeEnumDisplayText"
+      />
+    </section>
+
+    <section class="edge-enum card" aria-label="角块补全枚举">
+      <h2 class="cube-json__title"><code>enumerateCornerFillCubeStates</code></h2>
+      <p class="edge-enum__hint">
+        每个几何角槽（三格）至少一格为有效面色时，枚举补全空格；结果会去掉违反「约束 B · 扭转之和 mod
+        3」的方案（与合法性校验一致）。须能由 `buildCube` 得到 `cp`/`ep` 为置换（棱已填齐时更易满足）。选择方案后可一键写回左侧贴纸（含
+        3D）。
+      </p>
+      <div class="edge-enum__actions">
+        <button type="button" class="toolbar__primary" @click="runCornerEnumeration">枚举角补全</button>
+        <label v-if="cornerEnumEntries.length > 0" class="edge-enum__select">
+          <span class="edge-enum__select-label">选中方案</span>
+          <select v-model.number="selectedCornerEnumIndex" class="edge-enum__select-input">
+            <option v-for="(_, i) in cornerEnumEntries" :key="i" :value="i">#{{ i + 1 }}</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="selectedCornerEnumIndex === null || cornerEnumEntries.length === 0"
+          @click="applySelectedCornerEnumeration"
+        >
+          应用到魔方
+        </button>
+      </div>
+      <textarea
+        class="edge-enum__textarea"
+        readonly
+        rows="14"
+        spellcheck="false"
+        aria-label="角补全枚举结果"
+        :value="cornerEnumDisplayText"
+      />
+    </section>
+
+    <dialog
+      ref="candidateDialogRef"
+      class="candidate-dialog"
+      aria-labelledby="candidate-dialog-title"
+      @click="onCandidateDialogBackdropClick"
+    >
+      <div class="candidate-dialog__panel" @click.stop>
+        <div class="candidate-dialog__head">
+          <h2 id="candidate-dialog-title" class="candidate-dialog__title">
+            <code>computeQuantityOnlyCandidates(facelets)</code>
+          </h2>
+          <button type="button" class="candidate-dialog__close" @click="closeFaceletCandidateDialog">
+            关闭
+          </button>
+        </div>
+        <p class="candidate-dialog__hint">
+          返回长度为 54 的数组：未填格为六种面色，已填且合法面色者为该色单元素，非法字符为空数组。不做棱角几何收窄（见 <code>candidateConstraints.ts</code>）。
+        </p>
+        <p v-if="candidateDialogError" class="candidate-dialog__err">{{ candidateDialogError }}</p>
+        <textarea
+          v-else
+          class="candidate-dialog__textarea"
+          readonly
+          rows="18"
+          spellcheck="false"
+          aria-label="每格候选颜色 JSON"
+          :value="candidateMatrixText"
+        />
+      </div>
+    </dialog>
 
     <section class="cube-json card" aria-label="cubejs 内部状态">
       <h2 class="cube-json__title"><code>buildCube(facelets)</code>（与 cubejs <code>toJSON()</code> 同形，未决为 -1）</h2>
@@ -972,6 +1192,161 @@ function invalidateSolutionAndReset3D() {
 
 .footnote a {
   color: #2563eb;
+}
+
+.candidate-dialog {
+  width: min(96vw, 52rem);
+  max-height: 90vh;
+  margin: auto;
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+}
+
+.candidate-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.candidate-dialog__panel {
+  box-sizing: border-box;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 1rem 1.15rem 1.2rem;
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+}
+
+.candidate-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.candidate-dialog__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: #1a1a1a;
+  line-height: 1.35;
+}
+
+.candidate-dialog__title code {
+  font-size: 0.82rem;
+  background: #f4f4f4;
+  padding: 0.12rem 0.32rem;
+  border-radius: 6px;
+}
+
+.candidate-dialog__close {
+  flex-shrink: 0;
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.candidate-dialog__close:hover {
+  background: #f4f4f4;
+}
+
+.candidate-dialog__hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #555;
+}
+
+.candidate-dialog__err {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #a8281e;
+}
+
+.candidate-dialog__textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  border-radius: 8px;
+  border: 1px solid #e8e9ec;
+  background: #f6f7f9;
+  color: #1a1a1a;
+  min-height: 14rem;
+  max-height: min(58vh, 520px);
+  resize: vertical;
+}
+
+.edge-enum.card {
+  margin-top: 1.5rem;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  padding: 1rem 1.1rem 1.15rem;
+}
+
+.edge-enum__hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #666;
+}
+
+.edge-enum__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.85rem;
+  align-items: center;
+  margin-bottom: 0.65rem;
+}
+
+.edge-enum__select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  color: #333;
+}
+
+.edge-enum__select-label {
+  white-space: nowrap;
+}
+
+.edge-enum__select-input {
+  min-width: 5.5rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  background: #fff;
+  font-size: 0.85rem;
+}
+
+.edge-enum__textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  border-radius: 8px;
+  border: 1px solid #e8e9ec;
+  background: #f6f7f9;
+  color: #1a1a1a;
+  resize: vertical;
+  min-height: 12rem;
+  max-height: min(50vh, 480px);
 }
 
 .cube-json.card {
