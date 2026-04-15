@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import Cube from 'cubejs';
 import ColorCandidateBar from './components/ColorCandidateBar.vue';
 import Cube3DView from './components/Cube3DView.vue';
 import { computeQuantityOnlyCandidates } from './cube/candidateConstraints';
 import { EMPTY_FACELET, isEmptyCell } from './cube/cellValue';
 import { CENTER_INDICES } from './cube/faceletGeometry';
+import { buildCube } from './cube/buildCube';
 import {
   buildConstraintRows,
   solvedString,
@@ -18,7 +19,36 @@ import type { FaceId } from './cube/types';
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
 
+const MAX_UNDO = 80;
+/** 每次改色 / 载入 / 演示步 之前压入的 54 位串；撤销弹出上一帧（含撤销自动填充） */
+const undoStack = ref<string[]>([]);
+const isUndoing = ref(false);
+/** 选「空」清除某格后，本轮不跑唯一候选自动填充 */
+const skipUniquePropagationOnce = ref(false);
+
 const facelets = ref(solvedString());
+
+const canUndo = computed(() => undoStack.value.length > 0);
+
+function pushUndoSnapshot() {
+  if (isUndoing.value) return;
+  const s = facelets.value;
+  const st = undoStack.value;
+  if (st.length > 0 && st[st.length - 1] === s) return;
+  st.push(s);
+  if (st.length > MAX_UNDO) st.shift();
+}
+
+function undoFacelets() {
+  if (undoStack.value.length === 0) return;
+  isUndoing.value = true;
+  try {
+    const prev = undoStack.value.pop()!;
+    facelets.value = prev;
+  } finally {
+    isUndoing.value = false;
+  }
+}
 
 const selectedCell = ref<number | null>(null);
 
@@ -44,12 +74,18 @@ const canAutoFillUnique = computed(() => {
   return false;
 });
 
-function autoFillUniqueCandidates() {
+/**
+ * 将「候选仅 1 色」的空格递归填上；每轮只填一格，再重算候选。
+ * 若一轮内同时填多格，两条棱可能各自唯一候选同色，会同时落成同一棱身份（usedEK 尚来不及反映另一条）。
+ */
+function runUniquePropagation(): boolean {
+  let any = false;
+  let s = facelets.value;
   let changed = true;
   while (changed) {
     changed = false;
-    const all = computeQuantityOnlyCandidates(facelets.value);
-    const arr = facelets.value.split('');
+    const all = computeQuantityOnlyCandidates(s);
+    const arr = s.split('');
     for (let i = 0; i < 54; i++) {
       if (LOCKED_CENTER.has(i)) continue;
       if (!isEmptyCell(arr[i]!)) continue;
@@ -57,11 +93,36 @@ function autoFillUniqueCandidates() {
       if (c && c.length === 1) {
         arr[i] = c[0]!;
         changed = true;
+        any = true;
+        break;
       }
     }
-    facelets.value = arr.join('');
+    if (changed) s = arr.join('');
   }
+  if (any && s !== facelets.value) {
+    facelets.value = s;
+  }
+  return any;
+}
+
+watch(facelets, () => {
+  if (isUndoing.value) {
+    invalidateSolutionAndReset3D();
+    return;
+  }
+  if (skipUniquePropagationOnce.value) {
+    skipUniquePropagationOnce.value = false;
+    invalidateSolutionAndReset3D();
+    return;
+  }
+  runUniquePropagation();
   invalidateSolutionAndReset3D();
+});
+
+function autoFillUniqueCandidates() {
+  if (!canAutoFillUnique.value) return;
+  pushUndoSnapshot();
+  runUniquePropagation();
 }
 
 const FACE_COLORS: Record<FaceId, string> = {
@@ -123,10 +184,13 @@ function onStickerClick(globalIdx: number) {
 function applyPick(value: FaceId | null) {
   if (selectedCell.value === null) return;
   if (LOCKED_CENTER.has(selectedCell.value)) return;
+  if (value === null) {
+    skipUniquePropagationOnce.value = true;
+  }
+  pushUndoSnapshot();
   const arr = facelets.value.split('');
   arr[selectedCell.value] = value === null ? EMPTY_FACELET : value;
   facelets.value = arr.join('');
-  invalidateSolutionAndReset3D();
 }
 
 function clearSelection() {
@@ -134,29 +198,30 @@ function clearSelection() {
 }
 
 function setSolved() {
+  pushUndoSnapshot();
   facelets.value = solvedString();
   selectedCell.value = null;
-  invalidateSolutionAndReset3D();
 }
 
 function setRandomLegal() {
+  pushUndoSnapshot();
   const c = Cube.random();
   facelets.value = c.asString();
   selectedCell.value = null;
-  invalidateSolutionAndReset3D();
 }
 
 function exampleCornerTwist() {
+  pushUndoSnapshot();
   const s = solvedString().split('');
   s[8] = 'F';
   s[10] = 'U';
   s[20] = 'R';
   facelets.value = s.join('');
-  invalidateSolutionAndReset3D();
 }
 
 /** 除六个中心外全部置为未填 */
 function clearExceptCenters() {
+  pushUndoSnapshot();
   const solved = solvedString();
   const arr: string[] = Array.from({ length: 54 }, () => EMPTY_FACELET);
   for (const i of CENTER_INDICES) {
@@ -164,26 +229,16 @@ function clearExceptCenters() {
   }
   facelets.value = arr.join('');
   selectedCell.value = null;
-  invalidateSolutionAndReset3D();
 }
 
-/** cubejs：与校验中一致，在 54 位全为面色时调用 fromString → toJSON */
+/** 与校验一致：`buildCube` → 与 cubejs `toJSON()` 同形（未决为 -1） */
 const cubeJsonState = computed(() => {
   const s = facelets.value;
   if (s.length !== 54) {
     return { type: 'unavailable' as const, text: '须恰好 54 个字符。' };
   }
-  for (let i = 0; i < 54; i++) {
-    if (isEmptyCell(s[i]!)) {
-      return {
-        type: 'unavailable' as const,
-        text: '全部填色后展示 Cube.fromString(facelets).toJSON()。',
-      };
-    }
-  }
   try {
-    const cube = Cube.fromString(s);
-    return { type: 'json' as const, value: cube.toJSON() };
+    return { type: 'json' as const, value: buildCube(s) };
   } catch (e) {
     return {
       type: 'error' as const,
@@ -270,6 +325,7 @@ async function nextSolutionStep() {
   try {
     const before = facelets.value;
     await view.animateMove(move);
+    pushUndoSnapshot();
     const c = Cube.fromString(before);
     c.move(move);
     facelets.value = c.asString();
@@ -299,7 +355,7 @@ function invalidateSolutionAndReset3D() {
     <header class="header">
       <h1>3×3 魔方合法性校验</h1>
       <p class="lead">
-        依据色数守恒、中心唯一、棱/角块身份与唯一性、几何一致（手性/朝向）、以及角扭转 mod 3、棱翻转偶性、置换奇偶（约束 A–D）检验；右侧可逐项查看状态，点击某项可单独高亮相关贴纸。
+        依据色数守恒、中心唯一、棱/角块身份与唯一性、几何一致（手性/朝向）、以及角扭转 mod 3、棱翻转偶性、置换奇偶（约束 A–D）检验；全局项由 `buildCube` 解析（未决为 -1）。右侧可逐项查看状态，点击某项可单独高亮相关贴纸。
       </p>
     </header>
 
@@ -309,9 +365,18 @@ function invalidateSolutionAndReset3D() {
       <button type="button" class="muted" @click="clearExceptCenters">清空</button>
       <button
         type="button"
+        class="muted"
+        :disabled="!canUndo"
+        title="撤销上一步改色、载入或演示步；自动填充的唯一候选一并还原"
+        @click="undoFacelets"
+      >
+        撤销 ↩️
+      </button>
+      <button
+        type="button"
         class="toolbar__primary"
         :disabled="!canAutoFillUnique"
-        title="按色数与棱/角块约束，填满当前仅有一种候选颜色的空格（可重复传播）"
+        title="按色数与棱/角块约束填满唯一候选空格（改色后也会自动传播，可点此再跑一轮）"
         @click="autoFillUniqueCandidates"
       >
         填充唯一候选
@@ -491,7 +556,7 @@ function invalidateSolutionAndReset3D() {
     </div>
 
     <section class="cube-json card" aria-label="cubejs 内部状态">
-      <h2 class="cube-json__title"><code>Cube.fromString(facelets).toJSON()</code></h2>
+      <h2 class="cube-json__title"><code>buildCube(facelets)</code>（与 cubejs <code>toJSON()</code> 同形，未决为 -1）</h2>
       <pre v-if="cubeJsonState.type === 'json'" class="cube-json__pre">{{
         JSON.stringify(cubeJsonState.value, null, 2)
       }}</pre>

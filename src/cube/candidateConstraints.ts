@@ -5,7 +5,8 @@
  *  1. 色数上限     每种颜色至多 9 次（全体贴纸）
  *     棱贴纸       每种颜色至多 4 次（24 个棱位）
  *     角贴纸       每种颜色至多 4 次（24 个角位）
- *  2. 棱块         两格不同色、不对色；合法棱身份；已出现棱身份不重复
+ *  2. 棱块         基于 12 个棱槽（EDGE_FACELETS）与「已占用 multiset 集合」：
+ *                  两格异色非对色、须为合法物理棱；其它槽已占用的 multiset 不可再用
  *  3. 角块         三格互异、无对色；合法角身份；手性；已出现角身份不重复
  *
  * 以下五个函数对应全局可解性约束（角扭转和、棱翻转奇偶、置换奇偶等），
@@ -37,7 +38,10 @@ const REF_EDGE: readonly (readonly [FaceId, FaceId])[] = [
 ];
 
 const VALID_CORNER_KEYS = new Set(REF_CORNER.map(r => [...r].sort().join('')));
-const VALID_EDGE_KEYS   = new Set(REF_EDGE  .map(r => [...r].sort().join('')));
+const VALID_EDGE_KEYS = new Set(REF_EDGE.map((r) => [...r].sort().join('')));
+
+/** 几何棱槽数量（与 EDGE_FACELETS 长度一致） */
+const EDGE_SLOT_COUNT = 12;
 
 /** 每种颜色在棱贴纸 / 角贴纸上出现次数的上限（与实体魔方一致：各 4） */
 const MAX_PER_COLOR_ON_EDGES = 4;
@@ -45,8 +49,71 @@ const MAX_PER_COLOR_ON_CORNERS = 4;
 
 // ── 工具函数（含全局约束用，候选计算当前未调用）────────────────────────
 
-function sortKey(cs: readonly string[]) { return [...cs].sort().join(''); }
-function isFaceId(c: string): c is FaceId { return (FACES as readonly string[]).includes(c); }
+function sortKey(cs: readonly string[]) {
+  return [...cs].sort().join('');
+}
+function isFaceId(c: string): c is FaceId {
+  return (FACES as readonly string[]).includes(c);
+}
+
+type EdgeSlotColors = readonly [FaceId | null, FaceId | null];
+
+/** 读取 `slot`（0–11）上两贴纸颜色，空为 null */
+function readEdgeSlotColors(facelets: string, slot: number): EdgeSlotColors {
+  const [ia, ib] = EDGE_FACELETS[slot]!;
+  const a = facelets[ia]!;
+  const b = facelets[ib]!;
+  return [isFaceId(a) ? a : null, isFaceId(b) ? b : null];
+}
+
+/** 两格均填时返回无序 multiset 键；否则 null */
+function edgeSlotMultisetKey(colors: EdgeSlotColors): string | null {
+  const [x, y] = colors;
+  if (x !== null && y !== null) return sortKey([x, y]);
+  return null;
+}
+
+/**
+ * 全体「某棱槽两格均已填色」所占据的物理棱 multiset 键集合。
+ * 任意 multiset 在魔方上至多出现一次，故第二处不得再声称同一键。
+ */
+function fullyOccupiedEdgeMultisetKeys(facelets: string): Set<string> {
+  const keys = new Set<string>();
+  for (let e = 0; e < EDGE_SLOT_COUNT; e++) {
+    const k = edgeSlotMultisetKey(readEdgeSlotColors(facelets, e));
+    if (k !== null) keys.add(k);
+  }
+  return keys;
+}
+
+/**
+ * 当前格在棱槽 `ePos` 的端 `eSlot`（0 或 1）；在 `occupiedKeys` 为其它槽已占 multiset 时过滤候选。
+ * 对端未填时无法与 occupiedKeys 交叉，依赖外层串行传播避免并发冲突。
+ */
+function filterCandidatesOnEdgeSlot(
+  facelets: string,
+  ePos: number,
+  eSlot: 0 | 1,
+  cands: readonly FaceId[],
+  occupiedKeys: ReadonlySet<string>,
+): FaceId[] {
+  const pair = EDGE_FACELETS[ePos]!;
+  const otherIdx = pair[eSlot === 0 ? 1 : 0]!;
+  const otherCh = facelets[otherIdx]!;
+
+  if (!isFaceId(otherCh)) {
+    return [...cands];
+  }
+
+  return cands.filter((c) => {
+    if (c === otherCh) return false;
+    if (OPP[otherCh] === c) return false;
+    const key = sortKey([c, otherCh]);
+    if (!VALID_EDGE_KEYS.has(key)) return false;
+    if (occupiedKeys.has(key)) return false;
+    return true;
+  });
+}
 
 /**
  * 返回角块三元组 t 相对于角块 j 参考顺序的扭转量（0/1/2），若非合法循环置换则返回 null。
@@ -210,14 +277,8 @@ export function computeQuantityOnlyCandidates(facelets: string): readonly (reado
     usedCK.add(sortKey(triple));
   }
 
-  // ── 4. 已完全确定的棱块（两格全填）→ 占用身份键 ──
-  const usedEK = new Set<string>();
-  for (let e = 0; e < 12; e++) {
-    const [a, b] = EDGE_FACELETS[e]!;
-    const ca = facelets[a]!, cb = facelets[b]!;
-    if (!isFaceId(ca) || !isFaceId(cb)) continue;
-    usedEK.add(sortKey([ca, cb]));
-  }
+  // ── 4. 12 棱槽：已由「两格全填」槽占用的 multiset 键（物理棱身份集合）──
+  const occupiedEdgeMultisetKeys = fullyOccupiedEdgeMultisetKeys(facelets);
 
   // ── 5. 逐格计算候选（仅局部 + 色数）──
   const result: (readonly FaceId[])[] = [];
@@ -265,19 +326,13 @@ export function computeQuantityOnlyCandidates(facelets: string): readonly (reado
     } else if (ei) {
       cands = cands.filter((c) => cntEdge[c] < MAX_PER_COLOR_ON_EDGES);
       const [ePos, eSlot] = ei;
-      const pair = EDGE_FACELETS[ePos]!;
-      const otherVal = facelets[pair[eSlot === 0 ? 1 : 0]!]!;
-
-      if (isFaceId(otherVal)) {
-        cands = cands.filter((c) => {
-          if (c === otherVal) return false;
-          if (OPP[otherVal] === c) return false;
-          const key = sortKey([c, otherVal]);
-          if (!VALID_EDGE_KEYS.has(key)) return false;
-          if (usedEK.has(key)) return false;
-          return true;
-        });
-      }
+      cands = filterCandidatesOnEdgeSlot(
+        facelets,
+        ePos,
+        eSlot as 0 | 1,
+        cands,
+        occupiedEdgeMultisetKeys,
+      );
     }
 
     result.push(cands);

@@ -1,5 +1,13 @@
-import Cube from 'cubejs';
 import type { FaceId } from './types';
+import {
+  buildCube,
+  cornerPermutationParity,
+  edgePermutationParity,
+  faceletsFromCubeState,
+  isCubeStateFullyDetermined,
+  isPermutationCube,
+  type CubeStateJSON,
+} from './buildCube';
 import { EMPTY_FACELET, isEmptyCell } from './cellValue';
 import { FACES, FACE_ORDER_URFDLB } from './types';
 import {
@@ -18,7 +26,7 @@ export type LegalityIssue = {
 };
 
 /** 校验在何处提前结束（后续约束未执行） */
-export type ValidationStop = 'LEN' | 'CHAR' | 'INCOMPLETE' | null;
+export type ValidationStop = 'LEN' | 'CHAR' | null;
 
 export type LegalityReport = {
   ok: boolean;
@@ -84,7 +92,8 @@ export const CONSTRAINT_GROUPS: readonly {
   {
     id: 'incomplete',
     title: '填色完整',
-    description: '未填齐时仍可检测棱块、角块与色数（不超过约束）；填齐后可做 cubejs 完整校验。',
+    description:
+      '未填格由 `buildCube` 在对应分量上记为 -1；约束 A、几何一致、B/C/D 仅在全部槽位已解析且为合法置换时执行。',
     codes: ['INCOMPLETE'],
   },
   {
@@ -116,7 +125,8 @@ export const CONSTRAINT_GROUPS: readonly {
   {
     id: 'facelet_match',
     title: '几何一致',
-    description: '贴纸与 cubejs 唯一内部状态一致（含手性、棱/角朝向）。',
+    description:
+      '已填格与由 `buildCube` 状态展开的面串一致（与 cubejs `asString` 同规则）；未决槽位为 -1 时不做此项。',
     codes: ['FACELET_MISMATCH'],
   },
   {
@@ -128,7 +138,8 @@ export const CONSTRAINT_GROUPS: readonly {
   {
     id: 'flip_c',
     title: '约束 C · 棱翻转',
-    description: '已翻转棱块个数须为偶数。',
+    description:
+      '十二条棱贴纸均填齐且 `ep`/`eo` 可解出时即可校验；已翻转棱条数须为偶数（不必等角或中心全满）。',
     codes: ['EDGE_FLIP'],
   },
   {
@@ -143,8 +154,6 @@ export const CONSTRAINT_GROUPS: readonly {
 function firstSkippedGroupAfter(stop: ValidationStop): ConstraintGroupId | null {
   if (stop === 'LEN') return 'charset';
   if (stop === 'CHAR') return 'incomplete';
-  /** 未填齐时仍执行色数与棱/角局部，从块归属起未执行 */
-  if (stop === 'INCOMPLETE') return 'perm_a';
   return null;
 }
 
@@ -294,18 +303,27 @@ function mergeIndices(issues: LegalityIssue[]): Set<number> {
   return s;
 }
 
-function isPermutation(p: readonly number[], n: number): boolean {
-  const seen = new Uint8Array(n);
-  for (const x of p) {
-    if (x < 0 || x >= n || seen[x]) return false;
-    seen[x] = 1;
+/** 12 条棱槽的两格均为有效面色（角、中心可仍有空位）。 */
+function allEdgeSlotsStickerFilled(facelets54: string): boolean {
+  for (let e = 0; e < EDGE_FACELETS.length; e++) {
+    const [a, b] = EDGE_FACELETS[e]!;
+    if (!isFaceId(facelets54[a]!) || !isFaceId(facelets54[b]!)) return false;
   }
   return true;
 }
 
+/** 12 棱贴纸齐全且 `buildCube` 给出合法 `ep` 置换与完整 `eo` 时可算翻转奇偶（约束 C）。 */
+function canEvaluateEdgeFlipConstraint(state: CubeStateJSON, facelets54: string): boolean {
+  return (
+    allEdgeSlotsStickerFilled(facelets54) &&
+    isPermutationCube(state.ep, 12) &&
+    !state.eo.some((x) => x < 0)
+  );
+}
+
 /**
- * 对 54 位 facelet 串分层校验。未填色时仍可做色数（每种≤9）与棱/角局部；填齐后执行 cubejs（约束 A–D 等）。
- * `validationStop`：`INCOMPLETE` 时从「块归属」起标为未校验，色数与棱/角仍有效。
+ * 对 54 位 facelet 串分层校验。未填色时仍可做色数（每种≤9）与棱/角局部；全局约束由 `buildCube` 解析（-1 表示未决）。
+ * `validationStop`：仅 `LEN` / `CHAR` 提前返回时为非 null。
  */
 export function validateLegality(
   facelets54: string,
@@ -388,7 +406,7 @@ export function validateLegality(
     push(
       'color',
       'INCOMPLETE',
-      '存在未填色格；已检测色数（每种≤9）与已填棱/角；填齐后可做 cubejs 完整校验。',
+      '存在未填色格；约束 C 在 12 棱均填且 `ep`/`eo` 合法时可检；A、几何一致、B、D 仍须 `buildCube` 全槽可解且 cp/ep 为合法置换。',
       emptyCells,
     );
   }
@@ -589,11 +607,12 @@ export function validateLegality(
     }
   }
 
-  if (!incomplete) {
-  const cube = Cube.fromString(facelets54);
+  const state = buildCube(facelets54);
 
-  const { cp, co, ep, eo } = cube.toJSON();
-  if (!isPermutation(cp, 8) || !isPermutation(ep, 12)) {
+  if (
+    isCubeStateFullyDetermined(state) &&
+    (!isPermutationCube(state.cp, 8) || !isPermutationCube(state.ep, 12))
+  ) {
     push(
       'piece',
       'PERM_ID',
@@ -602,63 +621,81 @@ export function validateLegality(
     );
   }
 
-  const reconstructed = cube.asString();
-  if (checkFaceletMismatch && reconstructed !== facelets54) {
-    const diff: number[] = [];
-    for (let i = 0; i < 54; i++) {
-      if (facelets54[i] !== reconstructed[i]) diff.push(i);
+  if (checkFaceletMismatch) {
+    const reconstructed = faceletsFromCubeState(state);
+    if (reconstructed !== null) {
+      const diff: number[] = [];
+      for (let i = 0; i < 54; i++) {
+        if (isFaceId(facelets54[i]!) && reconstructed[i] !== facelets54[i]) {
+          diff.push(i);
+        }
+      }
+      if (diff.length) {
+        push(
+          'orientation',
+          'FACELET_MISMATCH',
+          '已填格与由 `buildCube` 状态展开的面串不一致（含角块手性/棱方向与几何矛盾）。',
+          diff,
+        );
+      }
     }
-    push(
-      'orientation',
-      'FACELET_MISMATCH',
-      '贴纸与唯一魔方状态不一致（含角块手性/棱方向与几何矛盾）。',
-      diff.length ? diff : [...Array(54).keys()],
-    );
   }
 
-  const sumCo = co.reduce((a: number, b: number) => a + b, 0);
-  if (sumCo % 3 !== 0) {
-    const cells: number[] = [];
-    for (const tri of CORNER_FACELETS) {
-      for (const i of tri) cells.push(i);
+  if (
+    isCubeStateFullyDetermined(state) &&
+    isPermutationCube(state.cp, 8)
+  ) {
+    const sumCo = state.co.reduce((a: number, b: number) => a + b, 0);
+    if (sumCo % 3 !== 0) {
+      const cells: number[] = [];
+      for (const tri of CORNER_FACELETS) {
+        for (const i of tri) cells.push(i);
+      }
+      push(
+        'group',
+        'TWIST_SUM',
+        '角块扭转之和须 ≡ 0 (mod 3)（约束 B）。',
+        cells,
+      );
     }
-    push(
-      'group',
-      'TWIST_SUM',
-      '角块扭转之和须 ≡ 0 (mod 3)（约束 B）。',
-      cells,
-    );
   }
 
-  const flipCount = eo.reduce((a: number, b: number) => a + b, 0);
-  if (flipCount % 2 !== 0) {
-    const cells: number[] = [];
-    for (const pair of EDGE_FACELETS) {
-      for (const i of pair) cells.push(i);
+  if (canEvaluateEdgeFlipConstraint(state, facelets54)) {
+    const flipCount = state.eo.reduce((a: number, b: number) => a + b, 0);
+    if (flipCount % 2 !== 0) {
+      const cells: number[] = [];
+      for (const pair of EDGE_FACELETS) {
+        for (const i of pair) cells.push(i);
+      }
+      push(
+        'group',
+        'EDGE_FLIP',
+        '已翻转棱块数须为偶数（约束 C）。',
+        cells,
+      );
     }
-    push(
-      'group',
-      'EDGE_FLIP',
-      '已翻转棱块数须为偶数（约束 C）。',
-      cells,
-    );
   }
 
-  if (cube.cornerParity() !== cube.edgeParity()) {
-    const cells: number[] = [];
-    for (const tri of CORNER_FACELETS) {
-      for (const i of tri) cells.push(i);
+  if (
+    isCubeStateFullyDetermined(state) &&
+    isPermutationCube(state.cp, 8) &&
+    isPermutationCube(state.ep, 12)
+  ) {
+    if (cornerPermutationParity(state.cp) !== edgePermutationParity(state.ep)) {
+      const cells: number[] = [];
+      for (const tri of CORNER_FACELETS) {
+        for (const i of tri) cells.push(i);
+      }
+      for (const pair of EDGE_FACELETS) {
+        for (const i of pair) cells.push(i);
+      }
+      push(
+        'group',
+        'PARITY',
+        '角块置换与棱块置换奇偶须一致（约束 D）。',
+        cells,
+      );
     }
-    for (const pair of EDGE_FACELETS) {
-      for (const i of pair) cells.push(i);
-    }
-    push(
-      'group',
-      'PARITY',
-      '角块置换与棱块置换奇偶须一致（约束 D）。',
-      cells,
-    );
-  }
   }
 
   const ok = issues.length === 0;
@@ -666,7 +703,7 @@ export function validateLegality(
     ok,
     issues,
     illegalCellIndices: mergeIndices(issues),
-    validationStop: incomplete ? 'INCOMPLETE' : null,
+    validationStop: null,
     disabledChecks,
   };
 }
