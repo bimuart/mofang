@@ -11,11 +11,13 @@ import {
   buildConstraintRows,
   enumerateCornerFillCubeStates,
   enumerateEdgeFillCubeStates,
+  enumerateParityIncompleteFillCubeStates,
   solvedString,
   validateLegality,
   type ConstraintGroupId,
   type CornerFillEnumerationEntry,
   type EdgeFillEnumerationEntry,
+  type ParityIncompleteFillEnumerationEntry,
 } from './cube/cubeConstraints';
 import { splitAlgorithm } from './cube/layerTurn';
 import type { FaceId } from './cube/types';
@@ -437,6 +439,47 @@ function applySelectedCornerEnumeration() {
   selectedCell.value = null;
 }
 
+const parityIncompleteEnumEntries = ref<ParityIncompleteFillEnumerationEntry[]>([]);
+const parityIncompleteEnumError = ref<string | null>(null);
+const selectedParityIncompleteEnumIndex = ref<number | null>(null);
+
+const parityIncompleteEnumDisplayText = computed(() => {
+  if (parityIncompleteEnumError.value) return parityIncompleteEnumError.value;
+  const list = parityIncompleteEnumEntries.value;
+  const n = list.length;
+  if (n === 0) {
+    return '（尚无枚举结果：点击「枚举奇偶置换-非完全填充」；须先满足 `enumerateEdgeFillCubeStates` 与 `enumerateCornerFillCubeStates` 各自前提，且两函数在「先棱后角」链路上有组合输出。）';
+  }
+  let out = `枚举数量: ${n}\n\n`;
+  for (let i = 0; i < n; i++) {
+    const e = list[i]!;
+    out += `--- #${i + 1} ---\n${JSON.stringify({ state: e.state, facelets54: e.facelets54 }, null, 2)}\n\n`;
+  }
+  return out;
+});
+
+function runParityIncompleteEnumeration() {
+  parityIncompleteEnumError.value = null;
+  try {
+    const out = enumerateParityIncompleteFillCubeStates(facelets.value);
+    parityIncompleteEnumEntries.value = out;
+    selectedParityIncompleteEnumIndex.value = out.length > 0 ? 0 : null;
+  } catch (e) {
+    parityIncompleteEnumEntries.value = [];
+    selectedParityIncompleteEnumIndex.value = null;
+    parityIncompleteEnumError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function applySelectedParityIncompleteEnumeration() {
+  const idx = selectedParityIncompleteEnumIndex.value;
+  const list = parityIncompleteEnumEntries.value;
+  if (idx === null || idx < 0 || idx >= list.length) return;
+  pushUndoSnapshot();
+  facelets.value = list[idx]!.facelets54;
+  selectedCell.value = null;
+}
+
 const candidateDialogRef = ref<HTMLDialogElement | null>(null);
 const candidateMatrixText = ref('');
 const candidateDialogError = ref<string | null>(null);
@@ -529,6 +572,12 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
     <p v-else-if="faceletsComplete && report.ok" class="solver-hint muted">
       填色完整且校验通过时可点击「获取解法」（首次需数秒加载两阶段算法表）。
     </p>
+
+    <section class="facelets54 cube-json card" aria-label="当前 54 位面串 facelets54">
+      <h2 class="cube-json__title"><code>facelets54</code>（当前）</h2>
+      <p class="facelets54__len">长度 {{ facelets.length }}（规范为 54）</p>
+      <pre class="cube-json__pre facelets54__pre">{{ facelets }}</pre>
+    </section>
 
     <div class="layout">
       <section class="view-3d" aria-label="三维魔方">
@@ -733,8 +782,8 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
     <section class="edge-enum card" aria-label="角块补全枚举">
       <h2 class="cube-json__title"><code>enumerateCornerFillCubeStates</code></h2>
       <p class="edge-enum__hint">
-        每个几何角槽（三格）至少一格为有效面色时，枚举补全空格；结果会去掉违反「约束 B · 扭转之和 mod
-        3」的方案（与合法性校验一致）。须能由 `buildCube` 得到 `cp`/`ep` 为置换（棱已填齐时更易满足）。选择方案后可一键写回左侧贴纸（含
+        每个几何角槽（三格）至少一格为有效面色时，枚举补全空格；补全后须 `buildCube` 得 `cp` 为置换且 `co` 无
+        -1（不要求 `ep`/`eo`）；结果再去掉违反「约束 B · 扭转之和 mod 3」的方案（与合法性校验一致）。选择方案后可一键写回左侧贴纸（含
         3D）。
       </p>
       <div class="edge-enum__actions">
@@ -761,6 +810,49 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
         spellcheck="false"
         aria-label="角补全枚举结果"
         :value="cornerEnumDisplayText"
+      />
+    </section>
+
+    <section class="edge-enum card" aria-label="奇偶置换非完全填充枚举">
+      <h2 class="cube-json__title"><code>enumerateParityIncompleteFillCubeStates</code></h2>
+      <p class="edge-enum__hint">
+        对每个 <code>enumerateEdgeFillCubeStates</code> 的补全结果再跑
+        <code>enumerateCornerFillCubeStates</code>，仅保留补全后 <code>cp</code>/<code>ep</code> 均为置换且角、棱置换奇偶一致（与约束
+        D）的方案；与合法性中「奇偶置换-非完全填充」在须枚举分支时所用集合一致。选择方案后可一键写回左侧贴纸（含 3D）。
+      </p>
+      <div class="edge-enum__actions">
+        <button type="button" class="toolbar__primary" @click="runParityIncompleteEnumeration">
+          枚举奇偶置换-非完全填充
+        </button>
+        <label v-if="parityIncompleteEnumEntries.length > 0" class="edge-enum__select">
+          <span class="edge-enum__select-label">选中方案</span>
+          <select
+            v-model.number="selectedParityIncompleteEnumIndex"
+            class="edge-enum__select-input"
+          >
+            <option v-for="(_, i) in parityIncompleteEnumEntries" :key="i" :value="i">
+              #{{ i + 1 }}
+            </option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="
+            selectedParityIncompleteEnumIndex === null || parityIncompleteEnumEntries.length === 0
+          "
+          @click="applySelectedParityIncompleteEnumeration"
+        >
+          应用到魔方
+        </button>
+      </div>
+      <textarea
+        class="edge-enum__textarea"
+        readonly
+        rows="14"
+        spellcheck="false"
+        aria-label="奇偶置换非完全填充枚举结果"
+        :value="parityIncompleteEnumDisplayText"
       />
     </section>
 
@@ -1426,5 +1518,17 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
   margin: 0;
   font-size: 0.85rem;
   color: #a8281e;
+}
+
+.facelets54__len {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.facelets54__pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: none;
 }
 </style>
