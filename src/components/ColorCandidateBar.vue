@@ -5,9 +5,9 @@ import type { FaceId } from '../cube/types';
 const props = defineProps<{
   candidates: readonly (FaceId | null)[];
   faceColors: Record<FaceId, string>;
-  /** 若给出，仅集合内的面色为「约束链」允许；不在集合内的面色按钮带禁用样式且不可点 */
+  /** 若给出，集合外的面色仍可选，仅显示「禁」样式与灰显（约束链提示） */
   constraintAllowedFaces?: readonly FaceId[] | null;
-  /** 为 true 时「空」按钮禁用 */
+  /** 为 true 时「空」仅灰显与「禁」标，仍可点击 */
   disableEmptyChip?: boolean;
 }>();
 
@@ -16,7 +16,8 @@ const allowedSet = computed(() => {
   return new Set(props.constraintAllowedFaces);
 });
 
-function isChipDisabled(c: FaceId | null): boolean {
+/** 是否显示约束链外的灰显与「禁」标（仍可点击选色） */
+function isChipConstraintMuted(c: FaceId | null): boolean {
   if (c === null) return props.disableEmptyChip === true;
   if (allowedSet.value === null) return false;
   return !allowedSet.value.has(c);
@@ -36,9 +37,15 @@ defineEmits<{
       class="chip"
       :class="{
         'chip--empty': c === null,
-        'chip--disabled': isChipDisabled(c),
+        'chip--constraint-muted': isChipConstraintMuted(c),
       }"
-      :disabled="isChipDisabled(c)"
+      :title="
+        isChipConstraintMuted(c)
+          ? c === null
+            ? '当前约束链下置空可能不通过，仍可点击'
+            : '不在约束链候选集合内，仍可点击选择'
+          : undefined
+      "
       :style="
         c === null
           ? { background: '#52525b', color: '#f4f4f5' }
@@ -47,7 +54,7 @@ defineEmits<{
       @click="$emit('pick', c)"
     >
       <span class="chip__lbl">{{ c === null ? '空' : c }}</span>
-      <span v-if="isChipDisabled(c)" class="chip__badge" aria-hidden="true">禁</span>
+      <span v-if="isChipConstraintMuted(c)" class="chip__badge" aria-hidden="true">禁</span>
     </button>
   </div>
 </template>
@@ -73,7 +80,7 @@ defineEmits<{
   transition: transform 0.1s;
 }
 
-.chip:hover:not(:disabled) {
+.chip:hover {
   transform: scale(1.06);
 }
 
@@ -81,13 +88,13 @@ defineEmits<{
   border-color: rgba(0, 0, 0, 0.22);
 }
 
-.chip--disabled {
-  cursor: not-allowed;
+.chip--constraint-muted {
+  cursor: pointer;
   opacity: 0.45;
   filter: grayscale(0.35);
 }
 
-.chip--disabled .chip__lbl {
+.chip--constraint-muted .chip__lbl {
   opacity: 0.85;
 }
 

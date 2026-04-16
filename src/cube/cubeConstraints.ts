@@ -18,7 +18,8 @@ import {
 } from './faceletGeometry';
 
 /**
- * 本模块集中：合法性分层校验（`validateLegality`）、约束行展示、棱/角补全枚举、置换奇偶-非完全填充枚举，
+ * 本模块集中：合法性分层校验（`validateLegality`）、约束行展示、棱/角补全枚举、置换奇偶-非完全填充枚举、
+ * 约束链候选与「随机其余」补全，
  * 以及约束 C（棱翻转偶数）等可复用判定。
  */
 
@@ -53,10 +54,9 @@ export type LegalityReport = {
   parityIncompletePassDetail?: {
     edgeC: number;
     cornerC: number;
-    prod: number;
     edgeA: number;
     cornerA: number;
-    /** `c_棱×c_角=1` 且 `a_棱>10` 且 `a_角>6` 时运行枚举后的方案数 */
+    /** 未命中「c_棱>3 或 c_角>3」与「棱 a<11 或角 a<7」免检、走枚举分支时，奇偶一致补全方案数 */
     enumCount?: number;
   };
 };
@@ -143,7 +143,7 @@ export const CONSTRAINT_GROUPS: readonly {
     id: 'parity_incomplete',
     title: '置换奇偶-非完全填充',
     description:
-      '在棱、角块（局部）均通过且可得 c 时：取两 c 之积；积>1 则通过；积<1 则不通过；积=1 时若非（棱 a>10 且 角 a>6）则通过；否则枚举「先棱补全再角补全」后 `cp`/`ep` 均为置换且角、棱置换奇偶一致的全部方案（与 `enumerateParityIncompleteFillCubeStates` 一致），至少须有一种。',
+      '在棱、角块（局部）均通过且可得 c 时：若 c_棱 或 c_角 任一大于 3 则通过；若棱活跃槽 a<11 或角活跃槽 a<7 亦通过；若任一为 0 则不通过；否则枚举「先棱补全再角补全」后 `cp`/`ep` 均为置换且角、棱置换奇偶一致的全部方案（与 `enumerateParityIncompleteFillCubeStates` 一致），至少须有一种。',
     codes: ['PARITY_INCOMPLETE_C_PRODUCT', 'PARITY_INCOMPLETE_NO_PARITY_COMPLETION'],
   },
   {
@@ -309,23 +309,23 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
       ];
     } else if (g.id === 'parity_incomplete' && !failed && report.parityIncompletePassDetail) {
       const d = report.parityIncompletePassDetail;
-      if (d.prod > 1) {
+      const ce = d.edgeC;
+      const cc = d.cornerC;
+      if (ce > 3 || cc > 3) {
         messages = [
-          `c_棱×c_角=${d.edgeC}×${d.cornerC}=${d.prod}>1，通过置换奇偶-非完全填充校验（不须枚举）。`,
+          `c_棱=${ce}、c_角=${cc}；满足 c_棱>3 或 c_角>3，通过置换奇偶-非完全填充校验（不须枚举）。`,
           ...fromIssues,
         ];
-      } else if (d.prod === 1) {
-        if (d.edgeA > 10 && d.cornerA > 6) {
-          messages = [
-            `c 乘积为 1（${d.edgeC}×${d.cornerC}），且棱 a=${d.edgeA}>10、角 a=${d.cornerA}>6：已枚举棱补全后再角补全且奇偶一致方案，共 ${d.enumCount ?? 0} 种；须至少一种（与下方枚举一致）。`,
-            ...fromIssues,
-          ];
-        } else {
-          messages = [
-            `c 乘积为 1（${d.edgeC}×${d.cornerC}）；不满足「棱 a>10 且 角 a>6」（当前棱 a=${d.edgeA}，角 a=${d.cornerA}），按规则直接通过。`,
-            ...fromIssues,
-          ];
-        }
+      } else if (d.edgeA < 11 || d.cornerA < 7) {
+        messages = [
+          `c_棱=${ce}、c_角=${cc}；a_棱=${d.edgeA}、a_角=${d.cornerA}；满足棱 a<11 或角 a<7，通过置换奇偶-非完全填充校验（不须枚举）。`,
+          ...fromIssues,
+        ];
+      } else if ((d.enumCount ?? 0) > 0) {
+        messages = [
+          `c_棱=${ce}、c_角=${cc}；已枚举「棱补全→角补全」且奇偶一致方案，共 ${d.enumCount} 种；须至少一种（与下方枚举一致）。`,
+          ...fromIssues,
+        ];
       } else {
         messages = fromIssues;
       }
@@ -567,6 +567,9 @@ function enumeratePartnerFaceIdsForEdge(c: FaceId): FaceId[] {
   return out;
 }
 
+/** 棱补全枚举：至少多少条几何棱槽已有一格为有效面色才进入枚举（12 槽中至多 `12 - 此值` 条允许两格均未填）。 */
+const EDGE_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED = 10;
+
 /** 棱补全枚举的一项：内部状态与补全后的 54 位面串（非棱格与输入一致） */
 export type EdgeFillEnumerationEntry = {
   state: CubeStateJSON;
@@ -574,8 +577,9 @@ export type EdgeFillEnumerationEntry = {
 };
 
 /**
- * 在「每个棱槽（`EDGE_FACELETS`）至少已有一格为有效面色」的前提下，枚举补全另一格的所有合法方式，
- * 并对每种补全后的 54 串调用 `buildCube`，收集无棱矛盾（`ep` 为置换、无 -1）的项。
+ * 在「至少 `EDGE_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED` 个棱槽（`EDGE_FACELETS`）各至少已有一格为有效面色」的前提下枚举：
+ * 仅缺一格的槽按 `REF_EDGE` 与邻色补另一格；两格均未填的棱槽至多 2 条（12 − `EDGE_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED`），各枚举 `REF_EDGE` 上合法色对与翻转（多条时递归组合）。
+ * 对每种补全后的 54 串调用 `buildCube`，收集无棱矛盾（`ep` 为置换、无 -1）的项。
  *
  * 非棱格与输入一致；返回前按完全填充情形下的棱翻转偶性过滤（与 `satisfiesEdgeFlipConstraint` 一致）。
  */
@@ -585,9 +589,19 @@ export function enumerateEdgeFillCubeStates(facelets54: string): EdgeFillEnumera
   }
 
   const chars = [...facelets54];
+  let slotsWithAtLeastOneFace = 0;
+  for (let slot = 0; slot < EDGE_FACELETS.length; slot++) {
+    const [ia, ib] = EDGE_FACELETS[slot]!;
+    if (isFaceId(chars[ia]!) || isFaceId(chars[ib]!)) slotsWithAtLeastOneFace++;
+  }
+  if (slotsWithAtLeastOneFace < EDGE_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED) {
+    return [];
+  }
+
   const occupiedKeys = new Set<string>();
   type Gap = { slot: number; fillIdx: 0 | 1; otherColor: FaceId };
   const gaps: Gap[] = [];
+  const bothEmptySlots: number[] = [];
 
   for (let slot = 0; slot < EDGE_FACELETS.length; slot++) {
     const [ia, ib] = EDGE_FACELETS[slot]!;
@@ -595,7 +609,10 @@ export function enumerateEdgeFillCubeStates(facelets54: string): EdgeFillEnumera
     const cb = chars[ib]!;
     const fa = isFaceId(ca);
     const fb = isFaceId(cb);
-    if (!fa && !fb) return [];
+    if (!fa && !fb) {
+      bothEmptySlots.push(slot);
+      continue;
+    }
     if (fa && fb) {
       const r = enumerateResolveEdgeSlotFromColors(ca, cb);
       if (r === null) return [];
@@ -646,11 +663,45 @@ export function enumerateEdgeFillCubeStates(facelets54: string): EdgeFillEnumera
     }
   };
 
-  dfs(0);
+  const dfsEmptyEdges = (ei: number): void => {
+    if (ei >= bothEmptySlots.length) {
+      dfs(0);
+      return;
+    }
+    const slot = bothEmptySlots[ei]!;
+    const [ia, ib] = EDGE_FACELETS[slot]!;
+    for (let j = 0; j < 12; j++) {
+      const ref = REF_EDGE[j]!;
+      const r0 = ref[0]!;
+      const r1 = ref[1]!;
+      for (const [c0, c1] of [
+        [r0, r1],
+        [r1, r0],
+      ] as const) {
+        const k = sortFaceKey([c0, c1]);
+        if (occupiedKeys.has(k)) continue;
+        const prevA = chars[ia]!;
+        const prevB = chars[ib]!;
+        chars[ia] = c0;
+        chars[ib] = c1;
+        occupiedKeys.add(k);
+        dfsEmptyEdges(ei + 1);
+        occupiedKeys.delete(k);
+        chars[ia] = prevA;
+        chars[ib] = prevB;
+      }
+    }
+  };
+
+  dfsEmptyEdges(0);
+
   return results.filter((entry) =>
     satisfiesEdgeFlipConstraint(entry.state, entry.facelets54),
   );
 }
+
+/** 角补全枚举：至少多少个几何角槽已有一格为有效面色才进入枚举（8 槽中至多 `8 - 此值` 个角三格均可未填）。 */
+const CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED = 6;
 
 /** 角补全枚举的一项：内部状态与补全后的 54 位面串（非角格与输入一致）。 */
 export type CornerFillEnumerationEntry = {
@@ -659,8 +710,8 @@ export type CornerFillEnumerationEntry = {
 };
 
 /**
- * 在「每个角槽（`CORNER_FACELETS`）至少已有一格为有效面色」的前提下，枚举补全空格：
- * 已填三格者须可 `resolveCornerSlot`；已填两格者唯一补第三格；仅填一格者 DFS 尝试 8×3 种 (块, 扭转)。
+ * 在「至少 `CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED` 个角槽（`CORNER_FACELETS`）各至少已有一格为有效面色」的前提下枚举：
+ * 已填三格者须可 `resolveCornerSlot`；已填两格者唯一补第三格；仅填一格者 DFS 尝试 8×3 种 (块, 扭转)；三格均未填的角槽至多 2 个（8 − `CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED`），各枚举 `REF_CORNER` 上 8×3 种 (块, 扭转)（多个时递归组合）再与其余槽一同判定。
  * 对每种补全后的 54 串调用 `buildCube`，收集 `cp` 为置换且 `cp`/`co` 无 -1 的项（不要求 `ep`/`eo` 已解）；返回前按完全填充情形下的角扭转 mod 3 过滤（与 `satisfiesCornerTwistConstraint` 一致）。
  */
 export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnumerationEntry[] {
@@ -669,8 +720,22 @@ export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnu
   }
 
   const chars = [...facelets54];
+  let slotsWithAtLeastOneFace = 0;
+  for (let slot = 0; slot < 8; slot++) {
+    const [ia, ib, ic] = CORNER_FACELETS[slot]!;
+    const n =
+      (isFaceId(chars[ia]!) ? 1 : 0) +
+      (isFaceId(chars[ib]!) ? 1 : 0) +
+      (isFaceId(chars[ic]!) ? 1 : 0);
+    if (n >= 1) slotsWithAtLeastOneFace++;
+  }
+  if (slotsWithAtLeastOneFace < CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED) {
+    return [];
+  }
+
   const occupiedKeys = new Set<string>();
   const oneFilledSlots: number[] = [];
+  const allEmptySlots: number[] = [];
 
   function writeThirdFromResolved(slot: number, j: number, ori: number): void {
     const [ia, ib, ic] = CORNER_FACELETS[slot]!;
@@ -691,7 +756,10 @@ export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnu
     const fb = isFaceId(cb);
     const fc = isFaceId(cc);
     const n = (fa ? 1 : 0) + (fb ? 1 : 0) + (fc ? 1 : 0);
-    if (n === 0) return [];
+    if (n === 0) {
+      allEmptySlots.push(slot);
+      continue;
+    }
     if (n === 3) {
       const r = resolveCornerSlot(chars.join(''), slot);
       if (r === null) return [];
@@ -765,7 +833,36 @@ export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnu
     }
   };
 
-  dfs(0);
+  const dfsEmptyCorners = (ei: number): void => {
+    if (ei >= allEmptySlots.length) {
+      dfs(0);
+      return;
+    }
+    const slot = allEmptySlots[ei]!;
+    const [ia, ib, ic] = CORNER_FACELETS[slot]!;
+    const ids = [ia, ib, ic] as const;
+    for (let j = 0; j < 8; j++) {
+      const ref = REF_CORNER[j]!;
+      for (let ori = 0; ori < 3; ori++) {
+        const prev: [string, string, string] = [chars[ia]!, chars[ib]!, chars[ic]!];
+        for (let m = 0; m < 3; m++) {
+          chars[ids[m]!] = ref[(m - ori + 3) % 3]!;
+        }
+        const k = sortFaceKey([ref[0]!, ref[1]!, ref[2]!]);
+        if (occupiedKeys.has(k)) {
+          for (let m = 0; m < 3; m++) chars[ids[m]!] = prev[m]!;
+          continue;
+        }
+        occupiedKeys.add(k);
+        dfsEmptyCorners(ei + 1);
+        occupiedKeys.delete(k);
+        for (let m = 0; m < 3; m++) chars[ids[m]!] = prev[m]!;
+      }
+    }
+  };
+
+  dfsEmptyCorners(0);
+
   return results.filter((entry) =>
     satisfiesCornerTwistConstraint(entry.state, entry.facelets54),
   );
@@ -1432,7 +1529,7 @@ function allEdgeAndCornerFaceletIndicesForParityHighlight(): number[] {
 }
 
 /**
- * 置换奇偶-非完全填充：用棱、角局部的 c 乘积与 a 分支；在须枚举时依赖 `enumerateParityIncompleteFillCubeStates`。
+ * 置换奇偶-非完全填充：用棱、角局部的 c 与 a；c_棱>3 或 c_角>3 通过；或（棱 a<11 或角 a<7）通过；任一 c=0 不通过；否则须枚举后至少一种奇偶一致补全。
  */
 function legalityPushParityIncompleteFill(
   facelets54: string,
@@ -1441,28 +1538,28 @@ function legalityPushParityIncompleteFill(
   cornerSum: { a: number; c: number } | undefined,
 ): LegalityReport['parityIncompletePassDetail'] | undefined {
   if (!edgeSum || !cornerSum) return undefined;
-  const prod = edgeSum.c * cornerSum.c;
+  const ce = edgeSum.c;
+  const cc = cornerSum.c;
   const detail: NonNullable<LegalityReport['parityIncompletePassDetail']> = {
-    edgeC: edgeSum.c,
-    cornerC: cornerSum.c,
-    prod,
+    edgeC: ce,
+    cornerC: cc,
     edgeA: edgeSum.a,
     cornerA: cornerSum.a,
   };
   const cells = allEdgeAndCornerFaceletIndicesForParityHighlight();
-  if (prod < 1) {
+  if (ce === 0 || cc === 0) {
     push(
       'group',
       'PARITY_INCOMPLETE_C_PRODUCT',
-      `置换奇偶-非完全填充：c_棱×c_角=${edgeSum.c}×${cornerSum.c}=${prod}<1，不通过。`,
+      `置换奇偶-非完全填充：c_棱=${ce}、c_角=${cc}，存在 c 为 0，不通过。`,
       cells,
     );
     return detail;
   }
-  if (prod > 1) {
+  if (ce > 3 || cc > 3) {
     return detail;
   }
-  if (!(edgeSum.a > 10 && cornerSum.a > 6)) {
+  if (edgeSum.a < 11 || cornerSum.a < 7) {
     return detail;
   }
   const list = enumerateParityIncompleteFillCubeStates(facelets54);
@@ -1471,7 +1568,7 @@ function legalityPushParityIncompleteFill(
     push(
       'group',
       'PARITY_INCOMPLETE_NO_PARITY_COMPLETION',
-      '置换奇偶-非完全填充：两 c 之积为 1 且棱 a>10、角 a>6，但「棱补全→角补全」后不存在角/棱置换奇偶一致的全填方案。',
+      '置换奇偶-非完全填充：既不满足（c_棱>3 或 c_角>3），也不满足（棱 a<11 或角 a<7），已枚举「棱补全→角补全」但不存在角/棱置换奇偶一致的全填方案。',
       cells,
     );
   }
@@ -1590,9 +1687,27 @@ export function computeConstraintChainBCandidates(facelets54: string): readonly 
 }
 
 /**
+ * **随机其余**：按下标 0→53 依次处理未填格（跳过六个中心）；每步用当前串调用 `computeConstraintChainBCandidates`，
+ * 若该格候选非空则随机取一色写入，再处理下一格（下一格基于更新后的面串重算候选）。
+ */
+export function randomFillRemainingByConstraintChainB(facelets54: string): string {
+  if (facelets54.length !== 54) return facelets54;
+  const chars = [...facelets54];
+  for (let i = 0; i < 54; i++) {
+    if (CENTER_INDEX_SET.has(i)) continue;
+    if (!isEmptyCell(chars[i]!)) continue;
+    const matrix = computeConstraintChainBCandidates(chars.join(''));
+    const opts = matrix[i]!;
+    if (opts.length === 0) continue;
+    chars[i] = opts[Math.floor(Math.random() * opts.length)]!;
+  }
+  return chars.join('');
+}
+
+/**
  * 对 54 位 facelet 串分层校验；结果用于右侧约束列表与 `buildConstraintRows`。
  *
- * 流程概要：`LEN` → `CHAR`+计数 → 局部与色数 → 置换奇偶-非完全填充（依赖两局部 c）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
+ * 流程概要：`LEN` → `CHAR`+计数 → 局部与色数 → 置换奇偶-非完全填充（两局部 c、a：c_棱>3 或 c_角>3 或棱 a<11 或角 a<7 免检通过；c 为 0 不通过；否则枚举）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
  * 未填色时仍可做色数与棱/角局部；全局项依赖 `buildCube`（未决为 `-1`）。
  * @returns `validationStop` 仅在为 `'LEN'` 或 `'CHAR'` 时提前结束；其余为 `null`。
  */

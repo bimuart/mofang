@@ -12,6 +12,7 @@ import {
   enumerateCornerFillCubeStates,
   enumerateEdgeFillCubeStates,
   enumerateParityIncompleteFillCubeStates,
+  randomFillRemainingByConstraintChainB,
   solvedString,
   validateConstraintChainA,
   validateLegality,
@@ -158,6 +159,23 @@ function fillOneFaceUniqueConstraintCandidates() {
     facelets.value = arr.join('');
     return;
   }
+}
+
+/** 是否存在非中心的未填格（「随机其余」仅在这些格上尝试） */
+const hasAnyNonCenterEmpty = computed(() => {
+  for (let i = 0; i < 54; i++) {
+    if (LOCKED_CENTER.has(i)) continue;
+    if (isEmptyCell(facelets.value[i]!)) return true;
+  }
+  return false;
+});
+
+/** 对当前 `facelets` 依次在未填格上按 `computeConstraintChainBCandidates` 随机取色并写回 */
+function applyRandomFillRemainingByConstraintChain() {
+  if (!hasAnyNonCenterEmpty.value) return;
+  pushUndoSnapshot();
+  facelets.value = randomFillRemainingByConstraintChainB(facelets.value);
+  selectedCell.value = null;
 }
 
 watch(facelets, () => {
@@ -532,6 +550,15 @@ function applySelectedParityIncompleteEnumeration() {
     <div class="toolbar">
       <button type="button" @click="setSolved">还原态</button>
       <button type="button" @click="setRandomLegal">随机合法态</button>
+      <button
+        type="button"
+        class="toolbar__primary"
+        :disabled="!hasAnyNonCenterEmpty"
+        title="按格下标 0→53 依次处理未填格（跳过中心）：每步用当前面串调用 computeConstraintChainBCandidates，候选非空则随机取一色写入"
+        @click="applyRandomFillRemainingByConstraintChain"
+      >
+        随机其余
+      </button>
       <button type="button" class="muted" @click="clearExceptCenters">清空</button>
       <button
         type="button"
@@ -653,7 +680,7 @@ function applySelectedParityIncompleteEnumeration() {
             <button type="button" class="picker__close" @click="clearSelection">关闭</button>
           </div>
           <p class="picker__sub">
-            六种面色与「空」均展示；带「禁」且灰显者为当前格代入后无法通过约束链（棱/角局部、棱翻转、角扭转、置换奇偶-非完全填充）的选项。
+            六种面色与「空」均展示；带「禁」且灰显者表示当前格代入后可能无法通过约束链（棱/角局部、棱翻转、角扭转、置换奇偶-非完全填充），仍可点击强制选色。
           </p>
           <ColorCandidateBar
             :candidates="pickerBarCandidates"
@@ -774,7 +801,8 @@ function applySelectedParityIncompleteEnumeration() {
     <section class="edge-enum card" aria-label="棱块补全枚举">
       <h2 class="cube-json__title"><code>enumerateEdgeFillCubeStates</code></h2>
       <p class="edge-enum__hint">
-        每个几何棱槽（两格）至少一格为有效面色时，枚举补全另一格；结果会去掉违反「约束 C · 棱翻转偶数」的方案（与合法性校验一致）。下方为各方案的
+        至少 10 个几何棱槽（两格）各至少一格为有效面色（至多两条棱两格均可未填）时枚举补全：仅缺一格的槽补另一格；整棱未填的槽各枚举
+        <code>REF_EDGE</code> 上合法色对与翻转（多条未填棱递归组合）。结果会去掉违反「约束 C · 棱翻转偶数」的方案（与合法性校验一致）。下方为各方案的
         <code>CubeStateJSON</code> 与补全后的 54 位串。选择方案后可一键写回左侧贴纸（含 3D）。
       </p>
       <div class="edge-enum__actions">
@@ -807,9 +835,10 @@ function applySelectedParityIncompleteEnumeration() {
     <section class="edge-enum card" aria-label="角块补全枚举">
       <h2 class="cube-json__title"><code>enumerateCornerFillCubeStates</code></h2>
       <p class="edge-enum__hint">
-        每个几何角槽（三格）至少一格为有效面色时，枚举补全空格；补全后须 `buildCube` 得 `cp` 为置换且 `co` 无
-        -1（不要求 `ep`/`eo`）；结果再去掉违反「约束 B · 扭转之和 mod 3」的方案（与合法性校验一致）。选择方案后可一键写回左侧贴纸（含
-        3D）。
+        至少 6 个几何角槽（三格）各至少一格为有效面色（至多两个角三格均可未填）时枚举补全：已填两格/一格按原逻辑；三格均未填的角槽各枚举
+        <code>REF_CORNER</code> 上 8×3 种 (块, 扭转)（多个未填角递归组合）。补全后须 <code>buildCube</code> 得 <code>cp</code> 为置换且
+        <code>co</code> 无 -1（不要求 <code>ep</code>/<code>eo</code>）；结果再去掉违反「约束 B ·
+        扭转之和 mod 3」的方案（与合法性校验一致）。选择方案后可一键写回左侧贴纸（含 3D）。
       </p>
       <div class="edge-enum__actions">
         <button type="button" class="toolbar__primary" @click="runCornerEnumeration">枚举角补全</button>
