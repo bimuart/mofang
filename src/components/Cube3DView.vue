@@ -11,7 +11,13 @@ import {
   parseMoveToken,
   remapSlotsAfterLayerRotation,
 } from '../cube/layerTurn';
-import { FACE_EULER, STICKER_EDGE_GAP, STICKER_SIZE, stickerCenter } from '../cube/stickerLayout';
+import {
+  FACE_EULER,
+  STICKER_EDGE_GAP,
+  STICKER_SIZE,
+  STICKER_THICKNESS,
+  stickerCenter,
+} from '../cube/stickerLayout';
 
 const props = defineProps<{
   facelets: string;
@@ -55,7 +61,8 @@ const disposableGeometries: THREE.BufferGeometry[] = [];
 let cubeRoot: THREE.Group | null = null;
 let hintRoot: THREE.Group | null = null;
 
-const planeGeometry = new THREE.PlaneGeometry(STICKER_SIZE, STICKER_SIZE);
+const shellPlaneGeometry = new THREE.PlaneGeometry(STICKER_SIZE, STICKER_SIZE);
+const stickerBodyGeometry = new THREE.BoxGeometry(STICKER_SIZE, STICKER_SIZE, STICKER_THICKNESS);
 
 /** 贴纸四周常驻黑框 */
 let stickerBlackFrameMaterial: THREE.MeshBasicMaterial | null = null;
@@ -68,8 +75,8 @@ const half = STICKER_SIZE / 2;
 const frameT = Math.max(0.02, STICKER_SIZE * 0.042);
 /** 黑框线宽 = 贴纸间实际缝宽的一半，铺在缝内、不盖住贴纸 */
 const gapHalf = STICKER_EDGE_GAP / 2;
-/** 局部 +Z：黑框在贴纸平面略后；选中壳、红框在贴纸前 */
-const zBlackGapFrame = -0.002;
+/** 局部 +Z：缝内黑框与贴片同厚，中心与贴纸盒对齐；选中壳、红框在贴纸前 */
+const zBlackGapFrame = -STICKER_THICKNESS / 2;
 const zSelectionShell = 0.0036;
 const zBorder = 0.006;
 
@@ -93,11 +100,12 @@ function easeInOutCubic(t: number): number {
 
 /**
  * 贴在贴纸外侧缝里的黑框：线宽 `gapHalf`，不占彩色面；条带外沿跨一格中心距 `STICKER_SIZE + STICKER_EDGE_GAP`。
+ * 沿外法线深度与 `STICKER_THICKNESS` 一致，与彩色贴片厚度对齐。
  */
 function buildGapBlackFrame(mat: THREE.MeshBasicMaterial, zOffset: number): THREE.Group {
   const root = new THREE.Group();
   const span = STICKER_SIZE + STICKER_EDGE_GAP;
-  const dz = Math.max(gapHalf * 0.9, 0.006);
+  const dz = STICKER_THICKNESS;
 
   const geoH = pushGeom(new THREE.BoxGeometry(span, gapHalf, dz));
   const geoV = pushGeom(new THREE.BoxGeometry(gapHalf, span, dz));
@@ -150,12 +158,16 @@ function hexToRgb(hex: string): THREE.Color {
 
 function applyStickerAppearance(globalIdx: number) {
   const mesh = stickerMeshes[globalIdx];
-  if (!mesh?.material || Array.isArray(mesh.material)) return;
-  const mat = mesh.material as THREE.MeshLambertMaterial;
-  const ch = props.facelets[globalIdx] ?? '';
+  if (!mesh?.material) return;
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  const mat = mats[0];
+  if (!(mat instanceof THREE.MeshLambertMaterial)) return;
 
+  const ch = props.facelets[globalIdx] ?? '';
   const semi = props.semiTransparent ?? false;
   const alpha = semi ? clamp01(props.stickerOpacity ?? 0.42) : 1;
+  const newSide = semi ? THREE.DoubleSide : THREE.FrontSide;
+
   if (isEmptyCell(ch)) {
     mat.color.setHex(0x52525b);
   } else {
@@ -164,13 +176,12 @@ function applyStickerAppearance(globalIdx: number) {
     mat.color.copy(hexToRgb(base));
   }
 
-  const newSide = semi ? THREE.DoubleSide : THREE.FrontSide;
   if (mat.side !== newSide || mat.transparent !== semi) {
     mat.side = newSide;
     mat.transparent = semi;
     mat.needsUpdate = true;
   }
-  mat.opacity = alpha;
+  mat.opacity = semi ? alpha : 1;
   mat.depthWrite = !semi;
 
   const br = borderRoots[globalIdx];
@@ -427,8 +438,17 @@ function buildCube(root: THREE.Group) {
     for (let row = 0; row < 3; row++) {
       for (let col = 0; col < 3; col++) {
         const g = face * 9 + row * 3 + col;
-        const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-        const mesh = new THREE.Mesh(planeGeometry, mat);
+        /** 薄盒六面共用同一材质，半透明时侧面与正面同色 */
+        const stickerMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+        const mesh = new THREE.Mesh(stickerBodyGeometry, [
+          stickerMat,
+          stickerMat,
+          stickerMat,
+          stickerMat,
+          stickerMat,
+          stickerMat,
+        ]);
+        mesh.position.z = -STICKER_THICKNESS / 2;
         mesh.userData.faceletIndex = g;
 
         const blackFrame = buildGapBlackFrame(blackFrameMat, zBlackGapFrame);
@@ -436,7 +456,7 @@ function buildCube(root: THREE.Group) {
         const border = buildEdgeFrame(flashMat, zBorder);
         border.visible = false;
 
-        const shell = new THREE.Mesh(planeGeometry, shellMat);
+        const shell = new THREE.Mesh(shellPlaneGeometry, shellMat);
         shell.position.z = zSelectionShell;
         shell.visible = false;
         shell.raycast = () => {};
@@ -676,7 +696,8 @@ onMounted(() => {
     renderer?.domElement.removeEventListener('pointerdown', onPointerDown);
     renderer?.domElement.removeEventListener('pointerup', onPointerUp);
     controls?.dispose();
-    planeGeometry.dispose();
+    shellPlaneGeometry.dispose();
+    stickerBodyGeometry.dispose();
     stickerBlackFrameMaterial?.dispose();
     stickerBlackFrameMaterial = null;
     borderFlashMaterial?.dispose();
@@ -688,7 +709,11 @@ onMounted(() => {
 
     for (const m of stickerMeshes) {
       const mat = m.material;
-      if (!Array.isArray(mat)) mat.dispose();
+      if (Array.isArray(mat)) {
+        mat[0]?.dispose();
+      } else {
+        (mat as THREE.Material | undefined)?.dispose();
+      }
     }
     stickerMeshes.length = 0;
     borderRoots.length = 0;

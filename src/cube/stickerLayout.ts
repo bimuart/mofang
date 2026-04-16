@@ -16,6 +16,9 @@ export const STICKER_GAP = 0.036;
  */
 export const STICKER_SIZE = (2 - 2 * STICKER_GAP) / 3;
 
+/** 彩色贴纸沿外法线方向的厚度（世界单位），略厚于薄片以增强立体感 */
+export const STICKER_THICKNESS = STICKER_SIZE * 0.036;
+
 /** 同一面上两贴纸相邻边之间的实际缝宽（中心距 `STEP` 与 `STICKER_SIZE` 之差） */
 export const STICKER_EDGE_GAP = STEP - STICKER_SIZE;
 

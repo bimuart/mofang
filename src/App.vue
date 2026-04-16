@@ -443,6 +443,8 @@ const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
 const solutionMoves = ref<string[]>([]);
 const solutionStepIndex = ref(0);
+/** 为 true 时下一次 `facelets` 变更来自「下一步」演示，不应清空解法或 reset 3D */
+const skipInvalidationForSolutionStep = ref(false);
 const nextHintMove = computed(() => {
   if (solutionMoves.value.length === 0) return null;
   if (solutionStepIndex.value >= solutionMoves.value.length) return null;
@@ -504,6 +506,7 @@ async function nextSolutionStep() {
     pushUndoSnapshot();
     const c = Cube.fromString(before);
     c.move(move);
+    skipInvalidationForSolutionStep.value = true;
     facelets.value = c.asString();
     solutionStepIndex.value += 1;
   } catch (e) {
@@ -527,6 +530,10 @@ function invalidateSolutionAndReset3D() {
 
 watch(facelets, () => {
   scheduleRandomFillPrewarm();
+  if (skipInvalidationForSolutionStep.value) {
+    skipInvalidationForSolutionStep.value = false;
+    return;
+  }
   if (isUndoing.value) {
     invalidateSolutionAndReset3D();
     return;
@@ -731,11 +738,27 @@ function applySelectedParityIncompleteEnumeration() {
     </div>
     <p v-if="solverError" class="solver-err">{{ solverError }}</p>
     <p v-else-if="solverBanner" class="solver-banner">{{ solverBanner }}</p>
-    <p v-else-if="solutionMoves.length > 0" class="solver-info">
-      还原步骤：已执行 {{ solutionStepIndex }} / {{ solutionMoves.length }}；下一步
-      <strong v-if="nextHintMove">{{ nextHintMove }}</strong>
-      <span v-else>（已完成）</span>
-    </p>
+    <div v-else-if="solutionMoves.length > 0" class="solver-info">
+      <p class="solver-info__lead">
+        还原步骤：已执行 {{ solutionStepIndex }} / {{ solutionMoves.length }}；点击「下一步」按序演示；当前步
+        <strong v-if="nextHintMove">{{ nextHintMove }}</strong>
+        <span v-else>（已完成）</span>
+      </p>
+      <ol class="solver-steps" aria-label="完整还原步骤序列">
+        <li
+          v-for="(m, i) in solutionMoves"
+          :key="`${i}-${m}`"
+          class="solver-steps__item"
+          :class="{
+            'solver-steps__item--done': i < solutionStepIndex,
+            'solver-steps__item--current': i === solutionStepIndex,
+            'solver-steps__item--pending': i > solutionStepIndex,
+          }"
+        >
+          <span class="solver-steps__move">{{ m }}</span>
+        </li>
+      </ol>
+    </div>
     <p v-else-if="faceletsComplete && report.ok" class="solver-hint muted">
       填色完整且校验通过时可点击「获取解法」（首次需数秒加载两阶段算法表）。
     </p>
@@ -766,7 +789,7 @@ function applySelectedParityIncompleteEnumeration() {
       <section class="view-3d" aria-label="三维魔方">
         <div class="view-3d__head">
           <p class="hint">
-            <strong>拖拽</strong>旋转视角（仅移动相机）；<strong>点击</strong>非中心贴纸后在下方选色（含「空」）；中心块固定不可改。填齐后可「获取解法」并按「下一步」播放单层旋转（含中心块随动）；蓝色箭头提示下一步转动方向。
+            <strong>拖拽</strong>旋转视角（仅移动相机）；<strong>点击</strong>非中心贴纸后在下方选色（含「空」）；中心块固定不可改。填齐后可「获取解法」，工具栏下列出全部还原步，按「下一步」播放单层旋转（含中心块随动）；蓝色箭头提示当前步转动方向。
           </p>
           <div class="semi-controls">
             <button
@@ -1140,6 +1163,47 @@ function applySelectedParityIncompleteEnumeration() {
 
 .solver-info {
   color: #1e3a5f;
+}
+
+.solver-info__lead {
+  margin: 0 0 0.4rem;
+}
+
+.solver-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  align-items: center;
+}
+
+.solver-steps__item {
+  margin: 0;
+  padding: 0.12rem 0.45rem;
+  border-radius: 4px;
+  border: 1px solid #bfdbfe;
+  background: #f8fafc;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.solver-steps__item--done {
+  color: #64748b;
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+}
+
+.solver-steps__item--current {
+  border-color: #2563eb;
+  background: #eff6ff;
+  font-weight: 700;
+  color: #1e40af;
+}
+
+.solver-steps__item--pending {
+  color: #475569;
 }
 
 .solver-err {
