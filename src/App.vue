@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import Cube from 'cubejs';
 import ColorCandidateBar from './components/ColorCandidateBar.vue';
 import Cube3DView from './components/Cube3DView.vue';
@@ -23,6 +23,7 @@ import {
 } from './cube/cubeConstraints';
 import { splitAlgorithm } from './cube/layerTurn';
 import { FACES, type FaceId } from './cube/types';
+import RandomFillPrewarmWorker from './workers/randomFillPrewarm.worker.ts?worker';
 
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
@@ -170,27 +171,138 @@ const hasAnyNonCenterEmpty = computed(() => {
   return false;
 });
 
-/** 对当前 `facelets` 依次在未填格上按 `computeConstraintChainBCandidates` 随机取色并写回 */
+/** 与 `facelets` 一致且有效时，点击「随机其余」可直接应用的预计算结果（`randomFillRemainingByConstraintChainB` 输出） */
+const randomFillCacheSource = ref<string | null>(null);
+const randomFillCacheResult = ref<string | null>(null);
+const randomFillCachePending = ref(false);
+let randomFillPrewarmGen = 0;
+let randomFillWorker: Worker | null = null;
+
+type RandomFillPrewarmWorkerMsg =
+  | { type: 'done'; gen: number; snapshot: string; out: string }
+  | { type: 'error'; gen: number; message: string };
+
+function tearDownRandomFillWorker() {
+  if (randomFillWorker) {
+    randomFillWorker.terminate();
+    randomFillWorker = null;
+  }
+}
+
+/** 在 Web Worker 中跑 `randomFillRemainingByConstraintChainB`；失败返回 false 以便主线程兜底 */
+function postRandomFillPrewarmCompute(gen: number, snapshot: string): boolean {
+  if (typeof Worker === 'undefined') return false;
+  try {
+    if (!randomFillWorker) {
+      randomFillWorker = new RandomFillPrewarmWorker();
+      randomFillWorker.addEventListener('message', (ev: MessageEvent<RandomFillPrewarmWorkerMsg>) => {
+        const data = ev.data;
+        if (!data || (data.type !== 'done' && data.type !== 'error')) return;
+        if (data.gen !== randomFillPrewarmGen) return;
+        if (data.type === 'error') {
+          randomFillCachePending.value = false;
+          return;
+        }
+        if (facelets.value !== data.snapshot) {
+          randomFillCachePending.value = false;
+          return;
+        }
+        randomFillCacheSource.value = data.snapshot;
+        randomFillCacheResult.value = data.out;
+        randomFillCachePending.value = false;
+      });
+      randomFillWorker.addEventListener('error', () => {
+        randomFillCachePending.value = false;
+        tearDownRandomFillWorker();
+      });
+    }
+    randomFillWorker.postMessage({ type: 'compute', gen, snapshot });
+    return true;
+  } catch {
+    tearDownRandomFillWorker();
+    return false;
+  }
+}
+
+onBeforeUnmount(() => {
+  tearDownRandomFillWorker();
+});
+
+function scheduleRandomFillPrewarm() {
+  const snapshot0 = facelets.value;
+  if (snapshot0.length !== 54) {
+    randomFillCacheSource.value = null;
+    randomFillCacheResult.value = null;
+    randomFillCachePending.value = false;
+    return;
+  }
+  let hasEmptyNonCenter = false;
+  for (let i = 0; i < 54; i++) {
+    if (LOCKED_CENTER.has(i)) continue;
+    if (isEmptyCell(snapshot0[i]!)) {
+      hasEmptyNonCenter = true;
+      break;
+    }
+  }
+  if (!hasEmptyNonCenter) {
+    randomFillCacheSource.value = snapshot0;
+    randomFillCacheResult.value = snapshot0;
+    randomFillCachePending.value = false;
+    return;
+  }
+
+  randomFillCachePending.value = true;
+  randomFillCacheSource.value = null;
+  randomFillCacheResult.value = null;
+  const gen = ++randomFillPrewarmGen;
+  const snapshot = snapshot0;
+
+  const runHeavyMainThread = () => {
+    if (gen !== randomFillPrewarmGen) return;
+    if (facelets.value !== snapshot) return;
+    const out = randomFillRemainingByConstraintChainB(snapshot);
+    if (gen !== randomFillPrewarmGen || facelets.value !== snapshot) return;
+    randomFillCacheSource.value = snapshot;
+    randomFillCacheResult.value = out;
+    randomFillCachePending.value = false;
+  };
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (gen !== randomFillPrewarmGen) return;
+      if (facelets.value !== snapshot) {
+        randomFillCachePending.value = false;
+        return;
+      }
+      if (postRandomFillPrewarmCompute(gen, snapshot)) return;
+      const ric = typeof globalThis.requestIdleCallback === 'function' ? globalThis.requestIdleCallback : null;
+      if (ric !== null) {
+        ric.call(globalThis, runHeavyMainThread, { timeout: 4000 });
+      } else {
+        setTimeout(runHeavyMainThread, 0);
+      }
+    });
+  });
+}
+
+const randomFillApplyReady = computed(() => {
+  if (!hasAnyNonCenterEmpty.value) return false;
+  if (randomFillCachePending.value) return false;
+  if (randomFillCacheSource.value !== facelets.value) return false;
+  return randomFillCacheResult.value !== null;
+});
+
+/** 对当前 `facelets` 应用预计算的「随机其余」；缓存未就绪时同步计算（兜底） */
 function applyRandomFillRemainingByConstraintChain() {
   if (!hasAnyNonCenterEmpty.value) return;
   pushUndoSnapshot();
-  facelets.value = randomFillRemainingByConstraintChainB(facelets.value);
+  if (randomFillApplyReady.value && randomFillCacheResult.value !== null) {
+    facelets.value = randomFillCacheResult.value;
+  } else {
+    facelets.value = randomFillRemainingByConstraintChainB(facelets.value);
+  }
   selectedCell.value = null;
 }
-
-watch(facelets, () => {
-  if (isUndoing.value) {
-    invalidateSolutionAndReset3D();
-    return;
-  }
-  invalidateSolutionAndReset3D();
-});
-
-watch(facelets, (v) => {
-  if (facelets54InputRef.value === document.activeElement) return;
-  facelets54Draft.value = v;
-  facelets54ApplyError.value = null;
-});
 
 const FACE_COLORS: Record<FaceId, string> = {
   U: '#ffffff',
@@ -413,6 +525,21 @@ function invalidateSolutionAndReset3D() {
   });
 }
 
+watch(facelets, () => {
+  scheduleRandomFillPrewarm();
+  if (isUndoing.value) {
+    invalidateSolutionAndReset3D();
+    return;
+  }
+  invalidateSolutionAndReset3D();
+}, { flush: 'post', immediate: true });
+
+watch(facelets, (v) => {
+  if (facelets54InputRef.value === document.activeElement) return;
+  facelets54Draft.value = v;
+  facelets54ApplyError.value = null;
+});
+
 const edgeEnumEntries = ref<EdgeFillEnumerationEntry[]>([]);
 const edgeEnumError = ref<string | null>(null);
 const selectedEdgeEnumIndex = ref<number | null>(null);
@@ -554,10 +681,16 @@ function applySelectedParityIncompleteEnumeration() {
         type="button"
         class="toolbar__primary"
         :disabled="!hasAnyNonCenterEmpty"
-        title="按格下标 0→53 依次处理未填格（跳过中心）：每步用当前面串调用 computeConstraintChainBCandidates，候选非空则随机取一色写入"
+        :title="
+          randomFillCachePending
+            ? '正在根据当前面串预计算「随机其余」结果…'
+            : randomFillApplyReady
+              ? '已预计算：点击立即套用（跳过中心，先唯一候选再随机直至无法推进）'
+              : '面串已变，预计算未完成或已过期：点击将现场计算（可能较慢）。改色、清空、撤销、填充唯一候选、应用到魔方后会自动在后台重算。'
+        "
         @click="applyRandomFillRemainingByConstraintChain"
       >
-        随机其余
+        {{ randomFillCachePending ? '随机其余…' : '随机其余' }}
       </button>
       <button type="button" class="muted" @click="clearExceptCenters">清空</button>
       <button

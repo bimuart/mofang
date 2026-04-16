@@ -18,9 +18,13 @@ import {
 } from './faceletGeometry';
 
 /**
- * 本模块集中：合法性分层校验（`validateLegality`）、约束行展示、棱/角补全枚举、置换奇偶-非完全填充枚举、
- * 约束链候选与「随机其余」补全，
- * 以及约束 C（棱翻转偶数）等可复用判定。
+ * 本模块集中：合法性分层校验、右侧约束列表、棱/角补全与置换奇偶非完全填充枚举、约束链与随机填色。
+ *
+ * **主要入口**：{@link validateLegality}、{@link buildConstraintRows}、{@link validateConstraintChainA}、
+ * {@link computeConstraintChainBCandidates}、{@link randomFillRemainingByConstraintChainB}；
+ * **枚举**：{@link enumerateEdgeFillCubeStates}、{@link enumerateCornerFillCubeStates}、{@link enumerateParityIncompleteFillCubeStates}；
+ * **与约束 B/C 共用的判定**：{@link satisfiesCornerTwistConstraint}、{@link satisfiesEdgeFlipConstraint}；
+ * **面串状态查询**：{@link hasGeometricEdgeWithBothStickersEmpty}、{@link allEdgeSlotsAtLeastOneFaceletFilled} 等。
  */
 
 export type LegalityIssue = {
@@ -181,13 +185,17 @@ export const CONSTRAINT_GROUPS: readonly {
   },
 ];
 
-/** validationStop 之后的首个约束组 id（该组及之后均未执行） */
+/**
+ * `validationStop` 不为 null 时，从该约束组起后续组在 UI 上标为「未校验」。
+ * `LEN` → 自字符集起跳过；`CHAR` → 自填色完整起跳过。
+ */
 function firstSkippedGroupAfter(stop: ValidationStop): ConstraintGroupId | null {
   if (stop === 'LEN') return 'charset';
   if (stop === 'CHAR') return 'incomplete';
   return null;
 }
 
+/** 合并本组 `codes` 所涉 issue 的 `cellIndices` 并去重，供约束行高亮。 */
 function mergeCodesForGroup(issues: LegalityIssue[], codes: readonly string[]): number[] {
   const set = new Set<number>();
   for (const iss of issues) {
@@ -197,6 +205,7 @@ function mergeCodesForGroup(issues: LegalityIssue[], codes: readonly string[]): 
   return [...set];
 }
 
+/** 收集本组 `codes` 命中的 issue 文案，顺序与 `issues` 一致。 */
 function messagesForGroup(issues: LegalityIssue[], codes: readonly string[]): string[] {
   const out: string[] = [];
   for (const iss of issues) {
@@ -233,6 +242,10 @@ function edgeLocalComputeAbc(facelets54: string): { a: number; b: number; c: num
   return { a, b, c };
 }
 
+/**
+ * 将一次 `validateLegality`（或提前结束的 LEN/CHAR 报告）展开为与 {@link CONSTRAINT_GROUPS} 同序的约束行，
+ * 含 pass / fail / skipped、合并高亮下标与展示用 `messages`（部分组在通过时会追加说明性首条）。
+ */
 export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
   const { issues, validationStop, disabledChecks } = report;
   const skipFrom = firstSkippedGroupAfter(validationStop);
@@ -416,6 +429,7 @@ function isCornerCyclicTwist(t: readonly [FaceId, FaceId, FaceId], pieceJ: numbe
   return false;
 }
 
+/** 合并全部 issue 的贴纸下标，写入 `LegalityReport.illegalCellIndices`。 */
 function mergeIndices(issues: LegalityIssue[]): Set<number> {
   const s = new Set<number>();
   for (const iss of issues) {
@@ -550,6 +564,7 @@ export function satisfiesEdgeFlipConstraint(
   return flipCount % 2 === 0;
 }
 
+/** 两格均为有效色时，在 `REF_EDGE` 中定位物理棱下标 `j` 及贴纸顺序对应的 `eo`（0/1）；无解返回 null。 */
 function enumerateResolveEdgeSlotFromColors(ca: FaceId, cb: FaceId): { j: number; eo: number } | null {
   for (let j = 0; j < 12; j++) {
     const ref = REF_EDGE[j]!;
@@ -559,6 +574,7 @@ function enumerateResolveEdgeSlotFromColors(ca: FaceId, cb: FaceId): { j: number
   return null;
 }
 
+/** 与已填端色 `c` 能组成合法物理棱（见 `VALID_EDGE_KEYS`）的另一端面色候选，用于单空格 DFS。 */
 function enumeratePartnerFaceIdsForEdge(c: FaceId): FaceId[] {
   const out: FaceId[] = [];
   for (const f of FACES) {
@@ -582,6 +598,8 @@ export type EdgeFillEnumerationEntry = {
  * 对每种补全后的 54 串调用 `buildCube`，收集无棱矛盾（`ep` 为置换、无 -1）的项。
  *
  * 非棱格与输入一致；返回前按完全填充情形下的棱翻转偶性过滤（与 `satisfiesEdgeFlipConstraint` 一致）。
+ *
+ * @throws 面串长度非 54
  */
 export function enumerateEdgeFillCubeStates(facelets54: string): EdgeFillEnumerationEntry[] {
   if (facelets54.length !== 54) {
@@ -713,6 +731,8 @@ export type CornerFillEnumerationEntry = {
  * 在「至少 `CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED` 个角槽（`CORNER_FACELETS`）各至少已有一格为有效面色」的前提下枚举：
  * 已填三格者须可 `resolveCornerSlot`；已填两格者唯一补第三格；仅填一格者 DFS 尝试 8×3 种 (块, 扭转)；三格均未填的角槽至多 2 个（8 − `CORNER_FILL_ENUM_MIN_SLOTS_AT_LEAST_ONE_FILLED`），各枚举 `REF_CORNER` 上 8×3 种 (块, 扭转)（多个时递归组合）再与其余槽一同判定。
  * 对每种补全后的 54 串调用 `buildCube`，收集 `cp` 为置换且 `cp`/`co` 无 -1 的项（不要求 `ep`/`eo` 已解）；返回前按完全填充情形下的角扭转 mod 3 过滤（与 `satisfiesCornerTwistConstraint` 一致）。
+ *
+ * @throws 面串长度非 54
  */
 export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnumerationEntry[] {
   if (facelets54.length !== 54) {
@@ -875,8 +895,11 @@ export type ParityIncompleteFillEnumerationEntry = {
 };
 
 /**
- * 对每个 `enumerateEdgeFillCubeStates` 结果再跑 `enumerateCornerFillCubeStates`，
- * 保留 `cp`/`ep` 均为合法置换且角置换与棱置换奇偶一致（与约束 D）的补全；按面串去重。
+ * **置换奇偶-非完全填充枚举**：先 {@link enumerateEdgeFillCubeStates}，再对每个棱补全结果跑 {@link enumerateCornerFillCubeStates}，
+ * 仅保留全解析且 `cp`/`ep` 均为置换、且角/棱置换奇偶一致（与约束 D）的补全；按补全后面串去重。
+ *
+ * @throws 面串长度非 54
+ * @returns 每项为合法 `CubeStateJSON` 与对应 54 位面串
  */
 export function enumerateParityIncompleteFillCubeStates(
   facelets54: string,
@@ -1098,6 +1121,7 @@ function legalityPushCenterMultiset(
   }
 }
 
+/** 几何棱槽 `e`（`EDGE_FACELETS`）是否至少有一格为六种有效面色。 */
 function edgeSlotHasAtLeastOneFaceColor(facelets54: string, e: number): boolean {
   const [a, b] = EDGE_FACELETS[e]!;
   return isFaceId(facelets54[a]!) || isFaceId(facelets54[b]!);
@@ -1226,6 +1250,7 @@ function legalityPushEdgeLocal(facelets54: string, push: LegalityPush): void {
   );
 }
 
+/** 几何角槽 `c`（`CORNER_FACELETS`）是否至少有一格为六种有效面色。 */
 function cornerSlotHasAtLeastOneFaceColor(facelets54: string, c: number): boolean {
   const [a, b, d] = CORNER_FACELETS[c]!;
   return isFaceId(facelets54[a]!) || isFaceId(facelets54[b]!) || isFaceId(facelets54[d]!);
@@ -1517,6 +1542,7 @@ function legalityPushPermutationParity(state: CubeStateJSON, push: LegalityPush)
   );
 }
 
+/** 全部棱、角贴纸下标并集，供置换奇偶-非完全填充相关 issue 高亮。 */
 function allEdgeAndCornerFaceletIndicesForParityHighlight(): number[] {
   const cells: number[] = [];
   for (const tri of CORNER_FACELETS) {
@@ -1530,6 +1556,8 @@ function allEdgeAndCornerFaceletIndicesForParityHighlight(): number[] {
 
 /**
  * 置换奇偶-非完全填充：用棱、角局部的 c 与 a；c_棱>3 或 c_角>3 通过；或（棱 a<11 或角 a<7）通过；任一 c=0 不通过；否则须枚举后至少一种奇偶一致补全。
+ *
+ * @returns 无两局部 `a,c` 摘要时 `undefined`；否则返回用于 UI 的 `parityIncompletePassDetail`（枚举分支会写 `enumCount`）。
  */
 function legalityPushParityIncompleteFill(
   facelets54: string,
@@ -1590,6 +1618,7 @@ const CHAIN_A_PARITY_INCOMPLETE_CODES = new Set([
   'PARITY_INCOMPLETE_NO_PARITY_COMPLETION',
 ]);
 
+/** 在给定 `push` 闭包内跑一段校验逻辑，收集产生的 issue（用于 `validateConstraintChainA` 分步检测）。 */
 function chainCollectIssues(run: (push: LegalityPush) => void): LegalityIssue[] {
   const issues: LegalityIssue[] = [];
   const push: LegalityPush = (category, code, message, cellIndices) => {
@@ -1599,13 +1628,16 @@ function chainCollectIssues(run: (push: LegalityPush) => void): LegalityIssue[] 
   return issues;
 }
 
+/** 是否存在任一 issue 的 `code` 属于给定集合（约束链短路失败）。 */
 function chainHasAnyCode(issues: LegalityIssue[], codes: ReadonlySet<string>): boolean {
   return issues.some((i) => codes.has(i.code));
 }
 
 /**
- * **约束校验**：依次检验棱块（局部）→角块（局部）→棱翻转（约束 C）→角扭转（约束 B）→置换奇偶-非完全填充；
- * 须恰好 54 位且每位为合法面色或未填占位；五步均无对应 issue 时返回 `true`。
+ * **约束链 A**（与选色条、候选过滤一致）：在长度与字符合法前提下，依次检验
+ * 棱局部 → 角局部 → 棱翻转（C 全/非完全）→ 角扭转（B 全/非完全）→ 置换奇偶-非完全填充。
+ *
+ * @returns 上述任一步出现对应 issue 码时 `false`，否则 `true`（不要求 `buildCube` 后约束 A/D 等全量合法性）。
  */
 export function validateConstraintChainA(facelets54: string): boolean {
   if (facelets54.length !== 54) return false;
@@ -1659,8 +1691,10 @@ export function validateConstraintChainA(facelets54: string): boolean {
 const CENTER_INDEX_SET = new Set<number>(CENTER_INDICES);
 
 /**
- * **候选颜色**：对每个非中心格，依次尝试六种面色代入该格后的面串调用 `validateConstraintChainA`，
- * 通过者加入该格候选集合；中心格返回六种面色（不在选色条中使用）。
+ * **约束链 B 候选**：对每个非中心格，将六种面色分别代入该格后调用 {@link validateConstraintChainA}，
+ * 通过的色泽入该格候选；中心格恒返回六色（选色条不使用）。
+ *
+ * @param facelets54 当前 54 位面串（长度非 54 时返回 54 个「六色全」占位矩阵）。
  */
 export function computeConstraintChainBCandidates(facelets54: string): readonly (readonly FaceId[])[] {
   const row = ((): readonly FaceId[] => [...FACES])();
@@ -1687,29 +1721,69 @@ export function computeConstraintChainBCandidates(facelets54: string): readonly 
 }
 
 /**
- * **随机其余**：按下标 0→53 依次处理未填格（跳过六个中心）；每步用当前串调用 `computeConstraintChainBCandidates`，
- * 若该格候选非空则随机取一色写入，再处理下一格（下一格基于更新后的面串重算候选）。
+ * **随机其余**：反复「饱和唯一候选 → 随机一格」直至无非中心空位或无法推进（跳过六个中心）。
+ * 每轮先对当前串调用 {@link computeConstraintChainBCandidates}，将所有候选长度为 1 的未填格一次性写入并重复直到没有唯一候选；
+ * 若仍有空位，再在候选非空的未填格中随机选一格、随机取一色写入，进入下一轮（下一轮会再次优先唯一候选，减少 `computeConstraintChainBCandidates` 次数）。
+ *
+ * @returns 长度非 54 时原样返回输入；否则返回可能仍含空位的更新后面串。
  */
 export function randomFillRemainingByConstraintChainB(facelets54: string): string {
   if (facelets54.length !== 54) return facelets54;
   const chars = [...facelets54];
-  for (let i = 0; i < 54; i++) {
-    if (CENTER_INDEX_SET.has(i)) continue;
-    if (!isEmptyCell(chars[i]!)) continue;
-    const matrix = computeConstraintChainBCandidates(chars.join(''));
-    const opts = matrix[i]!;
-    if (opts.length === 0) continue;
+
+  const hasEmptyNonCenter = (): boolean => {
+    for (let i = 0; i < 54; i++) {
+      if (CENTER_INDEX_SET.has(i)) continue;
+      if (isEmptyCell(chars[i]!)) return true;
+    }
+    return false;
+  };
+
+  while (hasEmptyNonCenter()) {
+    let matrix = computeConstraintChainBCandidates(chars.join(''));
+    while (true) {
+      const singles: { i: number; c: FaceId }[] = [];
+      for (let i = 0; i < 54; i++) {
+        if (CENTER_INDEX_SET.has(i)) continue;
+        if (!isEmptyCell(chars[i]!)) continue;
+        const opts = matrix[i]!;
+        if (opts.length === 1) singles.push({ i, c: opts[0]! });
+      }
+      if (singles.length === 0) break;
+      for (const { i, c } of singles) {
+        chars[i] = c;
+      }
+      matrix = computeConstraintChainBCandidates(chars.join(''));
+    }
+
+    if (!hasEmptyNonCenter()) break;
+
+    // 内层退出时 `matrix` 已对应当前面串且无「唯一候选」空位，可直接用于随机阶段，避免再算一整张表。
+    const pool: { i: number; opts: readonly FaceId[] }[] = [];
+    for (let i = 0; i < 54; i++) {
+      if (CENTER_INDEX_SET.has(i)) continue;
+      if (!isEmptyCell(chars[i]!)) continue;
+      const opts = matrix[i]!;
+      if (opts.length > 0) pool.push({ i, opts });
+    }
+    if (pool.length === 0) break;
+
+    const pick = pool[Math.floor(Math.random() * pool.length)]!;
+    const { i, opts } = pick;
     chars[i] = opts[Math.floor(Math.random() * opts.length)]!;
   }
+
   return chars.join('');
 }
 
 /**
- * 对 54 位 facelet 串分层校验；结果用于右侧约束列表与 `buildConstraintRows`。
+ * 对 54 位 facelet 串分层校验；结果用于右侧约束列表与 {@link buildConstraintRows}。
  *
- * 流程概要：`LEN` → `CHAR`+计数 → 局部与色数 → 置换奇偶-非完全填充（两局部 c、a：c_棱>3 或 c_角>3 或棱 a<11 或角 a<7 免检通过；c 为 0 不通过；否则枚举）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
+ * **流程概要**：`LEN` → `CHAR`+计数 → 局部与色数 → 置换奇偶-非完全填充（两局部 c、a：c_棱>3 或 c_角>3 或棱 a<11 或角 a<7 免检通过；c 为 0 不通过；否则枚举）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
  * 未填色时仍可做色数与棱/角局部；全局项依赖 `buildCube`（未决为 `-1`）。
- * @returns `validationStop` 仅在为 `'LEN'` 或 `'CHAR'` 时提前结束；其余为 `null`。
+ *
+ * @param options 可关闭几何一致或色数检测（对应行展示为 skipped）
+ * @returns 完整 `LegalityReport`；`validationStop` 仅在为 `'LEN'` 或 `'CHAR'` 时提前结束，其余为 `null`。
  */
 export function validateLegality(
   facelets54: string,
@@ -1798,6 +1872,7 @@ export function validateLegality(
   };
 }
 
+/** 已解状态的标准 54 位面串（每面 9 格同色，顺序 U R F D L B）。 */
 export function solvedString(): string {
   return FACE_ORDER_URFDLB.map((f) => f.repeat(9)).join('');
 }
