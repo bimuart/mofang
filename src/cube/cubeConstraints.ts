@@ -47,6 +47,8 @@ export type LegalityReport = {
   };
   /** 棱块（局部）匹配项通过时：活跃槽数 `a` 与完整指派方案数 `c`（无活跃槽或两格同色/对色时不设） */
   edgeLocalPassSummary?: { a: number; c: number };
+  /** 角块（局部）匹配项通过时：活跃槽数 `a` 与完整指派方案数 `c`（无活跃槽或结构错误未进入匹配时不设） */
+  cornerLocalPassSummary?: { a: number; c: number };
 };
 
 /** `validateLegality` 可选参数 */
@@ -261,13 +263,18 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
     const cellIndices = mergeCodesForGroup(issues, g.codes);
     const failed = issues.some((iss) => g.codes.includes(iss.code));
     const fromIssues = messagesForGroup(issues, g.codes);
-    const messages =
-      g.id === 'edge_local' && !failed && report.edgeLocalPassSummary
-        ? [
-            `棱块（局部）通过：活跃棱槽 a=${report.edgeLocalPassSummary.a}；每条活跃槽到互异 REF 下标的完整指派方案数 c=${report.edgeLocalPassSummary.c}。`,
-            ...fromIssues,
-          ]
-        : fromIssues;
+    let messages = fromIssues;
+    if (g.id === 'edge_local' && !failed && report.edgeLocalPassSummary) {
+      messages = [
+        `棱块（局部）通过：活跃棱槽 a=${report.edgeLocalPassSummary.a}；每条活跃槽到互异 REF 下标的完整指派方案数 c=${report.edgeLocalPassSummary.c}。`,
+        ...fromIssues,
+      ];
+    } else if (g.id === 'corner_local' && !failed && report.cornerLocalPassSummary) {
+      messages = [
+        `角块（局部）通过：活跃角槽 a=${report.cornerLocalPassSummary.a}；每条活跃槽到互异 REF 下标的完整指派方案数 c=${report.cornerLocalPassSummary.c}。`,
+        ...fromIssues,
+      ];
+    }
     return {
       id: g.id,
       title: g.title,
@@ -800,6 +807,7 @@ function legalityValidateLength(
       validationStop: 'LEN',
       disabledChecks,
       edgeLocalPassSummary: undefined,
+      cornerLocalPassSummary: undefined,
     };
   }
   return null;
@@ -847,6 +855,7 @@ function legalityValidateCharsetAndCountColors(
       validationStop: 'CHAR',
       disabledChecks,
       edgeLocalPassSummary: undefined,
+      cornerLocalPassSummary: undefined,
     };
   }
   return { counts };
@@ -1064,10 +1073,13 @@ function cornerSlotCompatibleWithRefPiece(facelets54: string, c: number, j: numb
 }
 
 /**
- * 约束组 **角块（局部）**：三面均填时先报 DUP/OPP/TYPE/CHIRALITY；再以「活跃角槽数 a」与「到 REF 的最大匹配 b」检验 a=b（`CORNER_UNIQUE`）。
+ * 角块（局部）三面/两格结构项；`push` 为 null 时不写入 issue，仅返回是否违规。
  */
-function legalityPushCornerLocal(facelets54: string, push: LegalityPush): void {
-  let cornerStructuralBad = false;
+function cornerLocalStructuralViolations(
+  facelets54: string,
+  push: LegalityPush | null,
+): boolean {
+  let bad = false;
   for (let c = 0; c < CORNER_FACELETS.length; c++) {
     const [a, b, d] = CORNER_FACELETS[c]!;
     const t = [facelets54[a]!, facelets54[b]!, facelets54[d]!];
@@ -1080,36 +1092,42 @@ function legalityPushCornerLocal(facelets54: string, push: LegalityPush): void {
     if (nFace === 2) {
       const [x, y] = faceIds;
       if (x === y) {
-        push(
-          'piece',
-          'CORNER_DUP',
-          `角位 ${c}：已填两格颜色相同，无法与第三格构成三种互异颜色。`,
-          cells,
-        );
-        cornerStructuralBad = true;
+        if (push) {
+          push(
+            'piece',
+            'CORNER_DUP',
+            `角位 ${c}：已填两格颜色相同，无法与第三格构成三种互异颜色。`,
+            cells,
+          );
+        }
+        bad = true;
         continue;
       }
       if (OPP[x] === y) {
-        push(
-          'piece',
-          'CORNER_OPP',
-          `角位 ${c}：已填两色为对色，无法构成合法角块（即使第三格未填）。`,
-          cells,
-        );
-        cornerStructuralBad = true;
+        if (push) {
+          push(
+            'piece',
+            'CORNER_OPP',
+            `角位 ${c}：已填两色为对色，无法构成合法角块（即使第三格未填）。`,
+            cells,
+          );
+        }
+        bad = true;
       }
       continue;
     }
 
     const uniq = new Set(faceIds);
     if (uniq.size < 3) {
-      push(
-        'piece',
-        'CORNER_DUP',
-        `角位 ${c}：角块须为三种不同颜色。`,
-        cells,
-      );
-      cornerStructuralBad = true;
+      if (push) {
+        push(
+          'piece',
+          'CORNER_DUP',
+          `角位 ${c}：角块须为三种不同颜色。`,
+          cells,
+        );
+      }
+      bad = true;
       continue;
     }
     const [p, q, r] = faceIds as [FaceId, FaceId, FaceId];
@@ -1123,63 +1141,85 @@ function legalityPushCornerLocal(facelets54: string, push: LegalityPush): void {
       if (OPP[x] === y) oppPair = true;
     }
     if (oppPair) {
-      push(
-        'piece',
-        'CORNER_OPP',
-        `角位 ${c}：存在对色同时出现，非法。`,
-        cells,
-      );
-      cornerStructuralBad = true;
+      if (push) {
+        push(
+          'piece',
+          'CORNER_OPP',
+          `角位 ${c}：存在对色同时出现，非法。`,
+          cells,
+        );
+      }
+      bad = true;
       continue;
     }
     const key = sortFaceKey([p, q, r]);
     if (!VALID_CORNER_KEYS.has(key)) {
-      push(
-        'piece',
-        'CORNER_TYPE',
-        `角位 ${c}：三色组合不是任一物理角块身份。`,
-        cells,
-      );
-      cornerStructuralBad = true;
+      if (push) {
+        push(
+          'piece',
+          'CORNER_TYPE',
+          `角位 ${c}：三色组合不是任一物理角块身份。`,
+          cells,
+        );
+      }
+      bad = true;
       continue;
     }
     const pieceJ = cornerPieceIndexFromSortedKey(key);
     if (pieceJ === null) continue;
     const triple = [p, q, r] as readonly [FaceId, FaceId, FaceId];
     if (!isCornerCyclicTwist(triple, pieceJ)) {
-      push(
-        'piece',
-        'CORNER_CHIRALITY',
-        `角位 ${c}：三色在槽位上的顺序不是该物理角块的合法扭转（手性错误，如两色对调）。`,
-        cells,
-      );
-      cornerStructuralBad = true;
+      if (push) {
+        push(
+          'piece',
+          'CORNER_CHIRALITY',
+          `角位 ${c}：三色在槽位上的顺序不是该物理角块的合法扭转（手性错误，如两色对调）。`,
+          cells,
+        );
+      }
+      bad = true;
     }
   }
-  if (cornerStructuralBad) return;
+  return bad;
+}
 
+/** 无结构违规前提下：活跃角槽与 `a,b,c`；若无活跃槽返回 null。 */
+function cornerLocalComputeAbc(facelets54: string): { a: number; b: number; c: number } | null {
   const activeSlots: number[] = [];
   for (let c = 0; c < 8; c++) {
     if (cornerSlotHasAtLeastOneFaceColor(facelets54, c)) activeSlots.push(c);
   }
   const a = activeSlots.length;
-  if (a === 0) return;
-
+  if (a === 0) return null;
   const adj: boolean[][] = activeSlots.map((c) =>
     Array.from({ length: 8 }, (_, j) => cornerSlotCompatibleWithRefPiece(facelets54, c, j)),
   );
   const b = maxMatchingBipartite(adj, 8);
+  const c = b < a ? 0 : countSaturatingInjections(adj, 8);
+  return { a, b, c };
+}
+
+/**
+ * 约束组 **角块（局部）**：结构项后匹配；`a,b,c` 与棱局部同构。
+ */
+function legalityPushCornerLocal(facelets54: string, push: LegalityPush): void {
+  if (cornerLocalStructuralViolations(facelets54, push)) return;
+
+  const abc = cornerLocalComputeAbc(facelets54);
+  if (!abc) return;
+  const { a, b, c } = abc;
   if (a === b) return;
 
   const cells: number[] = [];
-  for (const c of activeSlots) {
+  for (let c = 0; c < 8; c++) {
+    if (!cornerSlotHasAtLeastOneFaceColor(facelets54, c)) continue;
     const [ia, ib, id] = CORNER_FACELETS[c]!;
     cells.push(ia, ib, id);
   }
   push(
     'piece',
     'CORNER_UNIQUE',
-    `角块（局部）：至少一面已填的角槽 ${a} 个，与 REF 中 8 角可建立的一一分配至多 ${b} 个（须 a=b）。`,
+    `角块（局部）：至少一面已填的角槽 a=${a}；与 REF 的最大一一分配数 b=${b}（须 a=b）；每条活跃槽到互异 REF 下标的完整指派方案数 c=${c}（b<a 时为 0）。`,
     cells,
   );
 }
@@ -1340,6 +1380,21 @@ export function validateLegality(
   }
 
   legalityPushCornerLocal(facelets54, push);
+  const cornerLocalIssueCodes = new Set([
+    'CORNER_DUP',
+    'CORNER_OPP',
+    'CORNER_TYPE',
+    'CORNER_CHIRALITY',
+    'CORNER_UNIQUE',
+  ]);
+  const cornerLocalFailed = issues.some((i) => cornerLocalIssueCodes.has(i.code));
+  let cornerLocalPassSummary: { a: number; c: number } | undefined = undefined;
+  if (!cornerLocalFailed && !cornerLocalStructuralViolations(facelets54, null)) {
+    const cab = cornerLocalComputeAbc(facelets54);
+    if (cab !== null && cab.a === cab.b) {
+      cornerLocalPassSummary = { a: cab.a, c: cab.c };
+    }
+  }
 
   const state = buildCube(facelets54);
 
@@ -1359,6 +1414,7 @@ export function validateLegality(
     validationStop: null,
     disabledChecks,
     edgeLocalPassSummary,
+    cornerLocalPassSummary,
   };
 }
 
