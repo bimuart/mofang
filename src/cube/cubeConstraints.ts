@@ -9,7 +9,7 @@ import {
   resolveCornerSlot,
   type CubeStateJSON,
 } from './buildCube';
-import { EMPTY_FACELET, isEmptyCell } from './cellValue';
+import { EMPTY_FACELET, isEmptyCell, isFaceletChar } from './cellValue';
 import { FACES, FACE_ORDER_URFDLB } from './types';
 import {
   CENTER_INDICES,
@@ -18,7 +18,7 @@ import {
 } from './faceletGeometry';
 
 /**
- * 本模块集中：合法性分层校验（`validateLegality`）、约束行展示、棱/角补全枚举、奇偶置换-非完全填充枚举，
+ * 本模块集中：合法性分层校验（`validateLegality`）、约束行展示、棱/角补全枚举、置换奇偶-非完全填充枚举，
  * 以及约束 C（棱翻转偶数）等可复用判定。
  */
 
@@ -49,7 +49,7 @@ export type LegalityReport = {
   edgeLocalPassSummary?: { a: number; c: number };
   /** 角块（局部）匹配项通过时：活跃槽数 `a` 与完整指派方案数 `c`（无活跃槽或结构错误未进入匹配时不设） */
   cornerLocalPassSummary?: { a: number; c: number };
-  /** 「奇偶置换-非完全填充」：两局部均有 c 时记录判定用数据（含枚举分支时的方案数） */
+  /** 「置换奇偶-非完全填充」：两局部均有 c 时记录判定用数据（含枚举分支时的方案数） */
   parityIncompletePassDetail?: {
     edgeC: number;
     cornerC: number;
@@ -141,7 +141,7 @@ export const CONSTRAINT_GROUPS: readonly {
   },
   {
     id: 'parity_incomplete',
-    title: '奇偶置换-非完全填充',
+    title: '置换奇偶-非完全填充',
     description:
       '在棱、角块（局部）均通过且可得 c 时：取两 c 之积；积>1 则通过；积<1 则不通过；积=1 时若非（棱 a>10 且 角 a>6）则通过；否则枚举「先棱补全再角补全」后 `cp`/`ep` 均为置换且角、棱置换奇偶一致的全部方案（与 `enumerateParityIncompleteFillCubeStates` 一致），至少须有一种。',
     codes: ['PARITY_INCOMPLETE_C_PRODUCT', 'PARITY_INCOMPLETE_NO_PARITY_COMPLETION'],
@@ -311,7 +311,7 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
       const d = report.parityIncompletePassDetail;
       if (d.prod > 1) {
         messages = [
-          `c_棱×c_角=${d.edgeC}×${d.cornerC}=${d.prod}>1，通过奇偶置换-非完全填充校验（不须枚举）。`,
+          `c_棱×c_角=${d.edgeC}×${d.cornerC}=${d.prod}>1，通过置换奇偶-非完全填充校验（不须枚举）。`,
           ...fromIssues,
         ];
       } else if (d.prod === 1) {
@@ -771,7 +771,7 @@ export function enumerateCornerFillCubeStates(facelets54: string): CornerFillEnu
   );
 }
 
-/** 「奇偶置换-非完全填充」枚举的一项（与棱/角补全项同形）。 */
+/** 「置换奇偶-非完全填充」枚举的一项（与棱/角补全项同形）。 */
 export type ParityIncompleteFillEnumerationEntry = {
   state: CubeStateJSON;
   facelets54: string;
@@ -1432,7 +1432,7 @@ function allEdgeAndCornerFaceletIndicesForParityHighlight(): number[] {
 }
 
 /**
- * 奇偶置换-非完全填充：用棱、角局部的 c 乘积与 a 分支；在须枚举时依赖 `enumerateParityIncompleteFillCubeStates`。
+ * 置换奇偶-非完全填充：用棱、角局部的 c 乘积与 a 分支；在须枚举时依赖 `enumerateParityIncompleteFillCubeStates`。
  */
 function legalityPushParityIncompleteFill(
   facelets54: string,
@@ -1454,7 +1454,7 @@ function legalityPushParityIncompleteFill(
     push(
       'group',
       'PARITY_INCOMPLETE_C_PRODUCT',
-      `奇偶置换-非完全填充：c_棱×c_角=${edgeSum.c}×${cornerSum.c}=${prod}<1，不通过。`,
+      `置换奇偶-非完全填充：c_棱×c_角=${edgeSum.c}×${cornerSum.c}=${prod}<1，不通过。`,
       cells,
     );
     return detail;
@@ -1471,17 +1471,128 @@ function legalityPushParityIncompleteFill(
     push(
       'group',
       'PARITY_INCOMPLETE_NO_PARITY_COMPLETION',
-      '奇偶置换-非完全填充：两 c 之积为 1 且棱 a>10、角 a>6，但「棱补全→角补全」后不存在角/棱置换奇偶一致的全填方案。',
+      '置换奇偶-非完全填充：两 c 之积为 1 且棱 a>10、角 a>6，但「棱补全→角补全」后不存在角/棱置换奇偶一致的全填方案。',
       cells,
     );
   }
   return detail;
 }
 
+const CHAIN_A_EDGE_LOCAL_CODES = new Set(['EDGE_SAME', 'EDGE_OPP', 'EDGE_UNIQUE']);
+const CHAIN_A_CORNER_LOCAL_CODES = new Set([
+  'CORNER_DUP',
+  'CORNER_OPP',
+  'CORNER_TYPE',
+  'CORNER_CHIRALITY',
+  'CORNER_UNIQUE',
+]);
+const CHAIN_A_FLIP_CODES = new Set(['EDGE_FLIP_FULL', 'EDGE_FLIP_PARTIAL']);
+const CHAIN_A_TWIST_CODES = new Set(['TWIST_SUM_FULL', 'TWIST_SUM_PARTIAL']);
+const CHAIN_A_PARITY_INCOMPLETE_CODES = new Set([
+  'PARITY_INCOMPLETE_C_PRODUCT',
+  'PARITY_INCOMPLETE_NO_PARITY_COMPLETION',
+]);
+
+function chainCollectIssues(run: (push: LegalityPush) => void): LegalityIssue[] {
+  const issues: LegalityIssue[] = [];
+  const push: LegalityPush = (category, code, message, cellIndices) => {
+    issues.push({ category, code, message, cellIndices });
+  };
+  run(push);
+  return issues;
+}
+
+function chainHasAnyCode(issues: LegalityIssue[], codes: ReadonlySet<string>): boolean {
+  return issues.some((i) => codes.has(i.code));
+}
+
+/**
+ * **约束校验**：依次检验棱块（局部）→角块（局部）→棱翻转（约束 C）→角扭转（约束 B）→置换奇偶-非完全填充；
+ * 须恰好 54 位且每位为合法面色或未填占位；五步均无对应 issue 时返回 `true`。
+ */
+export function validateConstraintChainA(facelets54: string): boolean {
+  if (facelets54.length !== 54) return false;
+  for (let i = 0; i < 54; i++) {
+    if (!isFaceletChar(facelets54[i]!)) return false;
+  }
+
+  const edgeIssues = chainCollectIssues((push) => legalityPushEdgeLocal(facelets54, push));
+  if (chainHasAnyCode(edgeIssues, CHAIN_A_EDGE_LOCAL_CODES)) return false;
+
+  const cornerIssues = chainCollectIssues((push) => legalityPushCornerLocal(facelets54, push));
+  if (chainHasAnyCode(cornerIssues, CHAIN_A_CORNER_LOCAL_CODES)) return false;
+
+  const state = buildCube(facelets54);
+
+  const flipIssues = chainCollectIssues((push) => {
+    pushEdgeFlipIssuesWhenFullyFilled(facelets54, state, push);
+    pushEdgeFlipIssuesWhenPartiallyFilled(facelets54, push);
+  });
+  if (chainHasAnyCode(flipIssues, CHAIN_A_FLIP_CODES)) return false;
+
+  const twistIssues = chainCollectIssues((push) => {
+    pushCornerTwistIssuesWhenFullyFilled(facelets54, state, push);
+    pushCornerTwistIssuesWhenPartiallyFilled(facelets54, push);
+  });
+  if (chainHasAnyCode(twistIssues, CHAIN_A_TWIST_CODES)) return false;
+
+  let edgeLocalPassSummary: { a: number; c: number } | undefined;
+  if (!edgeLocalHasTwoStickerSameOrOpposite(facelets54)) {
+    const abc = edgeLocalComputeAbc(facelets54);
+    if (abc !== null && abc.a === abc.b) {
+      edgeLocalPassSummary = { a: abc.a, c: abc.c };
+    }
+  }
+  let cornerLocalPassSummary: { a: number; c: number } | undefined;
+  if (!cornerLocalStructuralViolations(facelets54, null)) {
+    const cab = cornerLocalComputeAbc(facelets54);
+    if (cab !== null && cab.a === cab.b) {
+      cornerLocalPassSummary = { a: cab.a, c: cab.c };
+    }
+  }
+
+  const parityIssues = chainCollectIssues((push) => {
+    legalityPushParityIncompleteFill(facelets54, push, edgeLocalPassSummary, cornerLocalPassSummary);
+  });
+  if (chainHasAnyCode(parityIssues, CHAIN_A_PARITY_INCOMPLETE_CODES)) return false;
+
+  return true;
+}
+
+const CENTER_INDEX_SET = new Set<number>(CENTER_INDICES);
+
+/**
+ * **候选颜色**：对每个非中心格，依次尝试六种面色代入该格后的面串调用 `validateConstraintChainA`，
+ * 通过者加入该格候选集合；中心格返回六种面色（不在选色条中使用）。
+ */
+export function computeConstraintChainBCandidates(facelets54: string): readonly (readonly FaceId[])[] {
+  const row = ((): readonly FaceId[] => [...FACES])();
+  if (facelets54.length !== 54) {
+    return Array.from({ length: 54 }, () => row);
+  }
+  const chars = facelets54.split('');
+  const out: FaceId[][] = [];
+  for (let i = 0; i < 54; i++) {
+    if (CENTER_INDEX_SET.has(i)) {
+      out.push([...FACES]);
+      continue;
+    }
+    const orig = chars[i]!;
+    const acc: FaceId[] = [];
+    for (const f of FACES) {
+      chars[i] = f;
+      if (validateConstraintChainA(chars.join(''))) acc.push(f);
+    }
+    chars[i] = orig;
+    out.push(acc);
+  }
+  return out;
+}
+
 /**
  * 对 54 位 facelet 串分层校验；结果用于右侧约束列表与 `buildConstraintRows`。
  *
- * 流程概要：`LEN` → `CHAR`+计数 → 局部与色数 → 奇偶置换-非完全填充（依赖两局部 c）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
+ * 流程概要：`LEN` → `CHAR`+计数 → 局部与色数 → 置换奇偶-非完全填充（依赖两局部 c）→ `buildCube` → 约束 A / 几何一致 / B（完全+非完全）/ C（完全+非完全）/ D。
  * 未填色时仍可做色数与棱/角局部；全局项依赖 `buildCube`（未决为 `-1`）。
  * @returns `validationStop` 仅在为 `'LEN'` 或 `'CHAR'` 时提前结束；其余为 `null`。
  */

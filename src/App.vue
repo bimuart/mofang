@@ -3,16 +3,17 @@ import { computed, nextTick, ref, watch } from 'vue';
 import Cube from 'cubejs';
 import ColorCandidateBar from './components/ColorCandidateBar.vue';
 import Cube3DView from './components/Cube3DView.vue';
-import { computeQuantityOnlyCandidates } from './cube/candidateConstraints';
-import { EMPTY_FACELET, isEmptyCell } from './cube/cellValue';
+import { EMPTY_FACELET, isEmptyCell, isFaceletChar } from './cube/cellValue';
 import { CENTER_INDICES } from './cube/faceletGeometry';
 import { buildCube } from './cube/buildCube';
 import {
   buildConstraintRows,
+  computeConstraintChainBCandidates,
   enumerateCornerFillCubeStates,
   enumerateEdgeFillCubeStates,
   enumerateParityIncompleteFillCubeStates,
   solvedString,
+  validateConstraintChainA,
   validateLegality,
   type ConstraintGroupId,
   type CornerFillEnumerationEntry,
@@ -20,7 +21,7 @@ import {
   type ParityIncompleteFillEnumerationEntry,
 } from './cube/cubeConstraints';
 import { splitAlgorithm } from './cube/layerTurn';
-import type { FaceId } from './cube/types';
+import { FACES, type FaceId } from './cube/types';
 
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
@@ -29,10 +30,40 @@ const MAX_UNDO = 80;
 /** 每次改色 / 载入 / 演示步 之前压入的 54 位串；撤销弹出上一帧（含撤销自动填充） */
 const undoStack = ref<string[]>([]);
 const isUndoing = ref(false);
-/** 选「空」清除某格后，本轮不跑唯一候选自动填充 */
-const skipUniquePropagationOnce = ref(false);
-
 const facelets = ref(solvedString());
+
+/** 与 `facelets` 同步，输入框聚焦时不覆盖正在编辑的内容 */
+const facelets54Draft = ref(facelets.value);
+const facelets54InputRef = ref<HTMLTextAreaElement | null>(null);
+const facelets54ApplyError = ref<string | null>(null);
+
+const facelets54CompactLen = computed(() => facelets54Draft.value.replace(/\s/g, '').length);
+
+function compactFacelets54Input(raw: string): string {
+  return raw.replace(/\s/g, '');
+}
+
+function applyFacelets54FromInput() {
+  facelets54ApplyError.value = null;
+  const compact = compactFacelets54Input(facelets54Draft.value);
+  if (compact.length !== 54) {
+    facelets54ApplyError.value = `须恰好 54 个字符（忽略空白后当前 ${compact.length} 个）。`;
+    return;
+  }
+  let out = '';
+  for (let i = 0; i < 54; i++) {
+    const ch = compact[i]!;
+    if (!isFaceletChar(ch)) {
+      facelets54ApplyError.value = `第 ${i + 1} 位非法字符 ${JSON.stringify(ch)}（仅允许 U、D、L、R、F、B 或未填 ${EMPTY_FACELET}）。`;
+      return;
+    }
+    out += isEmptyCell(ch) ? EMPTY_FACELET : ch;
+  }
+  pushUndoSnapshot();
+  facelets.value = out;
+  selectedCell.value = null;
+  facelets54Draft.value = facelets.value;
+}
 
 const canUndo = computed(() => undoStack.value.length > 0);
 
@@ -58,59 +89,75 @@ function undoFacelets() {
 
 const selectedCell = ref<number | null>(null);
 
-/** 未填格六种面色；已填格为该色（见 `candidateConstraints`） */
-const faceletConvergedCandidates = computed(() => computeQuantityOnlyCandidates(facelets.value));
-
-/** 当前选中格的候选色条（「空」= 未填） */
+/** 选色条固定六种面色 +「空」；是否可选由 `computeConstraintChainBCandidates` + `validateConstraintChainA` 约束链决定 */
 const pickerBarCandidates = computed((): readonly (FaceId | null)[] => {
-  const idx = selectedCell.value;
-  if (idx === null) return [];
-  const row = faceletConvergedCandidates.value[idx];
-  if (!row || row.length === 0) return [];
-  const ch = facelets.value[idx]!;
-  if (!isEmptyCell(ch)) return [...row, null];
-  return [...row, null];
+  if (selectedCell.value === null) return [];
+  return [...FACES, null];
 });
 
-const canAutoFillUnique = computed(() => {
-  const all = computeQuantityOnlyCandidates(facelets.value);
-  for (let i = 0; i < 54; i++) {
-    if (LOCKED_CENTER.has(i)) continue;
-    if (!isEmptyCell(facelets.value[i]!)) continue;
-    if (all[i]!.length === 1) return true;
+/** 仅在打开选色条时计算，避免无选中格时整表 54×6 次校验 */
+const constraintChainCandidatesPerCell = computed((): readonly (readonly FaceId[])[] | null => {
+  if (selectedCell.value === null) return null;
+  return computeConstraintChainBCandidates(facelets.value);
+});
+
+const constraintAllowedFacesForPicker = computed((): readonly FaceId[] | null => {
+  const idx = selectedCell.value;
+  const matrix = constraintChainCandidatesPerCell.value;
+  if (idx === null || matrix === null) return null;
+  return matrix[idx] ?? null;
+});
+
+const pickerDisableEmptyChip = computed(() => {
+  const idx = selectedCell.value;
+  if (idx === null) return false;
+  if (isEmptyCell(facelets.value[idx]!)) return true;
+  const arr = facelets.value.split('');
+  arr[idx] = EMPTY_FACELET;
+  return !validateConstraintChainA(arr.join(''));
+});
+
+/** 是否存在某一面（U→R→F→D→L→B）上至少一格未填且 `computeConstraintChainBCandidates` 在该格仅 1 色 */
+const canFillFaceUniqueConstraint = computed(() => {
+  const matrix = computeConstraintChainBCandidates(facelets.value);
+  for (let fi = 0; fi < 6; fi++) {
+    const base = fi * 9;
+    for (let k = 0; k < 9; k++) {
+      const i = base + k;
+      if (LOCKED_CENTER.has(i)) continue;
+      if (!isEmptyCell(facelets.value[i]!)) continue;
+      if (matrix[i]!.length === 1) return true;
+    }
   }
   return false;
 });
 
 /**
- * 将「候选仅 1 色」的空格递归填上；每轮只填一格，再重算候选。
- * 若一轮内同时填多格，两条棱可能各自唯一候选同色，会同时落成同一棱身份（usedEK 尚来不及反映另一条）。
+ * 按面顺序 U R F D L B：在第一个存在「未填格且约束链候选仅 1 色」的面上，将该面所有此类格一次性填入。
  */
-function runUniquePropagation(): boolean {
-  let any = false;
-  let s = facelets.value;
-  let changed = true;
-  while (changed) {
-    changed = false;
-    const all = computeQuantityOnlyCandidates(s);
-    const arr = s.split('');
-    for (let i = 0; i < 54; i++) {
+function fillOneFaceUniqueConstraintCandidates() {
+  const matrix = computeConstraintChainBCandidates(facelets.value);
+  for (let fi = 0; fi < 6; fi++) {
+    const base = fi * 9;
+    const toFill: { i: number; color: FaceId }[] = [];
+    for (let k = 0; k < 9; k++) {
+      const i = base + k;
       if (LOCKED_CENTER.has(i)) continue;
-      if (!isEmptyCell(arr[i]!)) continue;
-      const c = all[i];
-      if (c && c.length === 1) {
-        arr[i] = c[0]!;
-        changed = true;
-        any = true;
-        break;
+      if (!isEmptyCell(facelets.value[i]!)) continue;
+      const opts = matrix[i]!;
+      if (opts.length === 1) {
+        toFill.push({ i, color: opts[0]! });
       }
     }
-    if (changed) s = arr.join('');
+    if (toFill.length === 0) continue;
+    pushUndoSnapshot();
+    const arr = facelets.value.split('');
+    for (const { i, color } of toFill) {
+      arr[i] = color;
+    }
+    facelets.value = arr.join('');
+    return;
   }
-  if (any && s !== facelets.value) {
-    facelets.value = s;
-  }
-  return any;
 }
 
 watch(facelets, () => {
@@ -118,20 +165,14 @@ watch(facelets, () => {
     invalidateSolutionAndReset3D();
     return;
   }
-  if (skipUniquePropagationOnce.value) {
-    skipUniquePropagationOnce.value = false;
-    invalidateSolutionAndReset3D();
-    return;
-  }
-  runUniquePropagation();
   invalidateSolutionAndReset3D();
 });
 
-function autoFillUniqueCandidates() {
-  if (!canAutoFillUnique.value) return;
-  pushUndoSnapshot();
-  runUniquePropagation();
-}
+watch(facelets, (v) => {
+  if (facelets54InputRef.value === document.activeElement) return;
+  facelets54Draft.value = v;
+  facelets54ApplyError.value = null;
+});
 
 const FACE_COLORS: Record<FaceId, string> = {
   U: '#ffffff',
@@ -192,9 +233,6 @@ function onStickerClick(globalIdx: number) {
 function applyPick(value: FaceId | null) {
   if (selectedCell.value === null) return;
   if (LOCKED_CENTER.has(selectedCell.value)) return;
-  if (value === null) {
-    skipUniquePropagationOnce.value = true;
-  }
   pushUndoSnapshot();
   const arr = facelets.value.split('');
   arr[selectedCell.value] = value === null ? EMPTY_FACELET : value;
@@ -448,7 +486,7 @@ const parityIncompleteEnumDisplayText = computed(() => {
   const list = parityIncompleteEnumEntries.value;
   const n = list.length;
   if (n === 0) {
-    return '（尚无枚举结果：点击「枚举奇偶置换-非完全填充」；须先满足 `enumerateEdgeFillCubeStates` 与 `enumerateCornerFillCubeStates` 各自前提，且两函数在「先棱后角」链路上有组合输出。）';
+    return '（尚无枚举结果：点击「枚举置换奇偶-非完全填充」；须先满足 `enumerateEdgeFillCubeStates` 与 `enumerateCornerFillCubeStates` 各自前提，且两函数在「先棱后角」链路上有组合输出。）';
   }
   let out = `枚举数量: ${n}\n\n`;
   for (let i = 0; i < n; i++) {
@@ -480,30 +518,6 @@ function applySelectedParityIncompleteEnumeration() {
   selectedCell.value = null;
 }
 
-const candidateDialogRef = ref<HTMLDialogElement | null>(null);
-const candidateMatrixText = ref('');
-const candidateDialogError = ref<string | null>(null);
-
-function openFaceletCandidateDialog() {
-  candidateDialogError.value = null;
-  try {
-    const matrix = computeQuantityOnlyCandidates(facelets.value);
-    candidateMatrixText.value = JSON.stringify(matrix, null, 2);
-    candidateDialogRef.value?.showModal();
-  } catch (e) {
-    candidateDialogError.value = e instanceof Error ? e.message : String(e);
-    candidateMatrixText.value = '';
-    candidateDialogRef.value?.showModal();
-  }
-}
-
-function closeFaceletCandidateDialog() {
-  candidateDialogRef.value?.close();
-}
-
-function onCandidateDialogBackdropClick(ev: MouseEvent) {
-  if (ev.target === candidateDialogRef.value) closeFaceletCandidateDialog();
-}
 </script>
 
 <template>
@@ -523,7 +537,7 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
         type="button"
         class="muted"
         :disabled="!canUndo"
-        title="撤销上一步改色、载入或演示步；自动填充的唯一候选一并还原"
+        title="撤销上一步改色、载入或演示步"
         @click="undoFacelets"
       >
         撤销 ↩️
@@ -531,18 +545,11 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
       <button
         type="button"
         class="toolbar__primary"
-        :disabled="!canAutoFillUnique"
-        title="按色数与棱/角块约束填满唯一候选空格（改色后也会自动传播，可点此再跑一轮）"
-        @click="autoFillUniqueCandidates"
+        :disabled="!canFillFaceUniqueConstraint"
+        title="按 U R F D L B 面顺序，在第一个存在「未填格且约束链候选仅 1 色」的面上，将该面所有此类格填入该色（`computeConstraintChainBCandidates` + `validateConstraintChainA`）"
+        @click="fillOneFaceUniqueConstraintCandidates"
       >
         填充唯一候选
-      </button>
-      <button
-        type="button"
-        title="几何 + 色数 + 棱枚举（翻转偶性）+ 角槽 (j,ori) 收敛；结果为新窗口内 JSON"
-        @click="openFaceletCandidateDialog"
-      >
-        收敛候选色…
       </button>
       <button type="button" class="muted" @click="exampleCornerTwist">示例：角块乱向</button>
       <button
@@ -573,10 +580,26 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
       填色完整且校验通过时可点击「获取解法」（首次需数秒加载两阶段算法表）。
     </p>
 
-    <section class="facelets54 cube-json card" aria-label="当前 54 位面串 facelets54">
-      <h2 class="cube-json__title"><code>facelets54</code>（当前）</h2>
-      <p class="facelets54__len">长度 {{ facelets.length }}（规范为 54）</p>
-      <pre class="cube-json__pre facelets54__pre">{{ facelets }}</pre>
+    <section class="facelets54 cube-json card" aria-label="编辑 54 位面串 facelets54">
+      <h2 class="cube-json__title"><code>facelets54</code>（输入）</h2>
+      <p class="facelets54__len">
+        忽略空白后长度 {{ facelets54CompactLen }}（规范为 54）；顺序与 cubejs 一致：<strong>U R F D L B</strong> 各 9 格，未填为
+        <strong>{{ EMPTY_FACELET }}</strong>。
+      </p>
+      <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
+      <textarea
+        ref="facelets54InputRef"
+        v-model="facelets54Draft"
+        class="facelets54__textarea"
+        rows="4"
+        spellcheck="false"
+        aria-label="facelets54 文本输入"
+      />
+      <div class="facelets54__actions">
+        <button type="button" class="toolbar__primary" @click="applyFacelets54FromInput">
+          应用到魔方
+        </button>
+      </div>
     </section>
 
     <div class="layout">
@@ -630,11 +653,13 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
             <button type="button" class="picker__close" @click="clearSelection">关闭</button>
           </div>
           <p class="picker__sub">
-            候选颜色（<code>computeQuantityOnlyCandidates</code>；未填格为六种面色，与右侧合法性中的棱角局部等独立）（「空」= 未填，灰色）
+            六种面色与「空」均展示；带「禁」且灰显者为当前格代入后无法通过约束链（棱/角局部、棱翻转、角扭转、置换奇偶-非完全填充）的选项。
           </p>
           <ColorCandidateBar
             :candidates="pickerBarCandidates"
             :face-colors="FACE_COLORS"
+            :constraint-allowed-faces="constraintAllowedFacesForPicker"
+            :disable-empty-chip="pickerDisableEmptyChip"
             @pick="applyPick"
           />
         </div>
@@ -813,16 +838,16 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
       />
     </section>
 
-    <section class="edge-enum card" aria-label="奇偶置换非完全填充枚举">
+    <section class="edge-enum card" aria-label="置换奇偶非完全填充枚举">
       <h2 class="cube-json__title"><code>enumerateParityIncompleteFillCubeStates</code></h2>
       <p class="edge-enum__hint">
         对每个 <code>enumerateEdgeFillCubeStates</code> 的补全结果再跑
         <code>enumerateCornerFillCubeStates</code>，仅保留补全后 <code>cp</code>/<code>ep</code> 均为置换且角、棱置换奇偶一致（与约束
-        D）的方案；与合法性中「奇偶置换-非完全填充」在须枚举分支时所用集合一致。选择方案后可一键写回左侧贴纸（含 3D）。
+        D）的方案；与合法性中「置换奇偶-非完全填充」在须枚举分支时所用集合一致。选择方案后可一键写回左侧贴纸（含 3D）。
       </p>
       <div class="edge-enum__actions">
         <button type="button" class="toolbar__primary" @click="runParityIncompleteEnumeration">
-          枚举奇偶置换-非完全填充
+          枚举置换奇偶-非完全填充
         </button>
         <label v-if="parityIncompleteEnumEntries.length > 0" class="edge-enum__select">
           <span class="edge-enum__select-label">选中方案</span>
@@ -851,41 +876,10 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
         readonly
         rows="14"
         spellcheck="false"
-        aria-label="奇偶置换非完全填充枚举结果"
+        aria-label="置换奇偶非完全填充枚举结果"
         :value="parityIncompleteEnumDisplayText"
       />
     </section>
-
-    <dialog
-      ref="candidateDialogRef"
-      class="candidate-dialog"
-      aria-labelledby="candidate-dialog-title"
-      @click="onCandidateDialogBackdropClick"
-    >
-      <div class="candidate-dialog__panel" @click.stop>
-        <div class="candidate-dialog__head">
-          <h2 id="candidate-dialog-title" class="candidate-dialog__title">
-            <code>computeQuantityOnlyCandidates(facelets)</code>
-          </h2>
-          <button type="button" class="candidate-dialog__close" @click="closeFaceletCandidateDialog">
-            关闭
-          </button>
-        </div>
-        <p class="candidate-dialog__hint">
-          返回长度为 54 的数组：未填格为六种面色，已填且合法面色者为该色单元素，非法字符为空数组。不做棱角几何收窄（见 <code>candidateConstraints.ts</code>）。
-        </p>
-        <p v-if="candidateDialogError" class="candidate-dialog__err">{{ candidateDialogError }}</p>
-        <textarea
-          v-else
-          class="candidate-dialog__textarea"
-          readonly
-          rows="18"
-          spellcheck="false"
-          aria-label="每格候选颜色 JSON"
-          :value="candidateMatrixText"
-        />
-      </div>
-    </dialog>
 
     <section class="cube-json card" aria-label="cubejs 内部状态">
       <h2 class="cube-json__title"><code>buildCube(facelets)</code>（与 cubejs <code>toJSON()</code> 同形，未决为 -1）</h2>
@@ -1319,99 +1313,6 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
   color: #2563eb;
 }
 
-.candidate-dialog {
-  width: min(96vw, 52rem);
-  max-height: 90vh;
-  margin: auto;
-  padding: 0;
-  border: none;
-  border-radius: 14px;
-  background: transparent;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
-}
-
-.candidate-dialog::backdrop {
-  background: rgba(15, 23, 42, 0.45);
-}
-
-.candidate-dialog__panel {
-  box-sizing: border-box;
-  max-height: 90vh;
-  overflow: auto;
-  padding: 1rem 1.15rem 1.2rem;
-  border-radius: 14px;
-  background: #fff;
-  border: 1px solid #e5e5e5;
-}
-
-.candidate-dialog__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.5rem;
-}
-
-.candidate-dialog__title {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 650;
-  color: #1a1a1a;
-  line-height: 1.35;
-}
-
-.candidate-dialog__title code {
-  font-size: 0.82rem;
-  background: #f4f4f4;
-  padding: 0.12rem 0.32rem;
-  border-radius: 6px;
-}
-
-.candidate-dialog__close {
-  flex-shrink: 0;
-  padding: 0.35rem 0.65rem;
-  border-radius: 8px;
-  border: 1px solid #ccc;
-  background: #fff;
-  cursor: pointer;
-  font-size: 0.82rem;
-}
-
-.candidate-dialog__close:hover {
-  background: #f4f4f4;
-}
-
-.candidate-dialog__hint {
-  margin: 0 0 0.65rem;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  color: #555;
-}
-
-.candidate-dialog__err {
-  margin: 0;
-  font-size: 0.85rem;
-  color: #a8281e;
-}
-
-.candidate-dialog__textarea {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0.65rem 0.75rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.72rem;
-  line-height: 1.4;
-  border-radius: 8px;
-  border: 1px solid #e8e9ec;
-  background: #f6f7f9;
-  color: #1a1a1a;
-  min-height: 14rem;
-  max-height: min(58vh, 520px);
-  resize: vertical;
-}
-
 .edge-enum.card {
   margin-top: 1.5rem;
   background: #fff;
@@ -1526,9 +1427,40 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
   color: #666;
 }
 
-.facelets54__pre {
+.facelets54__textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 0.65rem;
+  padding: 0.65rem 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: none;
+  border-radius: 8px;
+  border: 1px solid #c8cad0;
+  background: #fff;
+  color: #1a1a1a;
+  resize: vertical;
+  min-height: 5rem;
+}
+
+.facelets54__textarea:focus {
+  outline: none;
+  border-color: #5b7cfa;
+  box-shadow: 0 0 0 2px rgba(91, 124, 250, 0.2);
+}
+
+.facelets54__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.facelets54__err {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  color: #a8281e;
 }
 </style>
