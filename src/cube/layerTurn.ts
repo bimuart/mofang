@@ -88,6 +88,26 @@ export function splitAlgorithm(alg: string): string[] {
     .filter(Boolean);
 }
 
+/** 单步 token 的逆（与 cubejs 面转一致） */
+export function invertMoveToken(token: string): string {
+  const p = parseMoveToken(token.trim());
+  if (!p) throw new Error(`Invalid move token: ${JSON.stringify(token)}`);
+  if (p.power === 0) return `${p.face}'`;
+  if (p.power === 1) return `${p.face}2`;
+  return `${p.face}`;
+}
+
+/**
+ * 若 `moves` 为「当前态 → 还原态」的依次转动，则返回「还原态 → 当前态」的依次转动（逐步逆元并逆序）。
+ */
+export function invertAlgorithmMoves(moves: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = moves.length - 1; i >= 0; i--) {
+    out.push(invertMoveToken(moves[i]!));
+  }
+  return out;
+}
+
 function vecForGlobalIndex(g: number): THREE.Vector3 {
   const fi = Math.floor(g / 9);
   const rem = g % 9;

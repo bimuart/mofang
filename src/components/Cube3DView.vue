@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js';
 import { isEmptyCell } from '../cube/cellValue';
 import type { FaceId } from '../cube/types';
 import {
@@ -41,7 +41,9 @@ function clamp01(n: number): number {
 }
 
 const emit = defineEmits<{
-  stickerClick: [index: number];
+  stickerClick: [index: number, clientX: number, clientY: number];
+  /** 短按且未命中贴纸（用于关闭选色等） */
+  stickerPointerMiss: [];
 }>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -49,7 +51,7 @@ const containerRef = ref<HTMLDivElement | null>(null);
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
-let controls: OrbitControls | null = null;
+let controls: TrackballControls | null = null;
 let raf = 0;
 
 const stickerMeshes: THREE.Mesh[] = [];
@@ -580,25 +582,28 @@ onMounted(() => {
   const h = el.clientHeight || 480;
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf2f3f7);
+  scene.background = null;
 
   camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 100);
   camera.position.set(3.4, 2.5, 4.6);
   camera.lookAt(0, 0, 0);
 
-  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setClearColor(0x000000, 0);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(w, h);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
   el.appendChild(renderer.domElement);
 
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.06;
+  controls = new TrackballControls(camera, renderer.domElement);
+  controls.rotateSpeed = 2.3;
+  controls.staticMoving = false;
+  controls.dynamicDampingFactor = 0.08;
   controls.minDistance = 2.8;
   controls.maxDistance = 14;
   controls.target.set(0, 0, 0);
+  controls.handleResize();
 
   scene.add(new THREE.AmbientLight(0xffffff, 1.05));
   scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c0d0, 0.55));
@@ -651,9 +656,14 @@ onMounted(() => {
     if (hits.length > 0) {
       const idx = hits[0]!.object.userData.faceletIndex;
       if (typeof idx === 'number') {
-        if (props.lockedIndices?.has(idx)) return;
-        emit('stickerClick', idx);
+        if (props.lockedIndices?.has(idx)) {
+          emit('stickerPointerMiss');
+          return;
+        }
+        emit('stickerClick', idx, ev.clientX, ev.clientY);
       }
+    } else {
+      emit('stickerPointerMiss');
     }
   }
 
@@ -667,6 +677,7 @@ onMounted(() => {
     camera.aspect = cw / ch;
     camera.updateProjectionMatrix();
     renderer.setSize(cw, ch);
+    controls?.handleResize();
   });
   ro.observe(el);
 
@@ -747,6 +758,7 @@ watch(
   () =>
     [
       props.facelets,
+      props.faceColors,
       [...props.highlightIndices].sort().join(','),
       props.selectedIndex ?? '',
     ] as const,
@@ -763,7 +775,7 @@ watch(
 );
 
 watch(
-  () => [props.semiTransparent, props.stickerOpacity] as const,
+  () => props.stickerOpacity,
   () => {
     syncAllStickers();
   },
@@ -785,7 +797,7 @@ watch(
   min-height: min(72vh, 560px);
   border-radius: 12px;
   overflow: hidden;
-  background: #e8e9ee;
+  background: transparent;
   touch-action: none;
 }
 </style>

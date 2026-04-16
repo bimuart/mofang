@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  watch,
+  watchEffect,
+} from 'vue';
 import Cube from 'cubejs';
 import ColorCandidateBar from './components/ColorCandidateBar.vue';
 import Cube3DView from './components/Cube3DView.vue';
@@ -17,16 +24,20 @@ import {
   validateConstraintChainA,
   validateLegality,
   type ConstraintGroupId,
+  type ConstraintRow,
   type CornerFillEnumerationEntry,
   type EdgeFillEnumerationEntry,
   type ParityIncompleteFillEnumerationEntry,
 } from './cube/cubeConstraints';
-import { splitAlgorithm } from './cube/layerTurn';
+import { invertAlgorithmMoves, splitAlgorithm } from './cube/layerTurn';
 import { FACES, type FaceId } from './cube/types';
 import RandomFillPrewarmWorker from './workers/randomFillPrewarm.worker.ts?worker';
 
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
+
+/** 为 true 时显示下方「枚举 / buildCube JSON」开发面板；逻辑与函数仍保留，默认不向普通用户展示 */
+const SHOW_DEV_CUBE_ENUM_JSON = false;
 
 const MAX_UNDO = 80;
 /** 每次改色 / 载入 / 演示步 之前压入的 54 位串；撤销弹出上一帧（含撤销自动填充） */
@@ -39,11 +50,11 @@ const facelets54Draft = ref(facelets.value);
 const facelets54InputRef = ref<HTMLTextAreaElement | null>(null);
 const facelets54ApplyError = ref<string | null>(null);
 
-const facelets54CompactLen = computed(() => facelets54Draft.value.replace(/\s/g, '').length);
-
 function compactFacelets54Input(raw: string): string {
   return raw.replace(/\s/g, '');
 }
+
+const facelets54CompactLen = computed(() => compactFacelets54Input(facelets54Draft.value).length);
 
 function applyFacelets54FromInput() {
   facelets54ApplyError.value = null;
@@ -90,6 +101,14 @@ function undoFacelets() {
 }
 
 const selectedCell = ref<number | null>(null);
+
+/** 选色面板 `position:fixed` 锚点（最近一次点中贴纸的指针位置） */
+const pickerPointerPos = ref({ x: 0, y: 0 });
+
+const pickerFloatingStyle = computed(() => ({
+  left: `${pickerPointerPos.value.x}px`,
+  top: `${pickerPointerPos.value.y}px`,
+}));
 
 /** 选色条固定六种面色 +「空」；是否可选由 `computeConstraintChainBCandidates` + `validateConstraintChainA` 约束链决定 */
 const pickerBarCandidates = computed((): readonly (FaceId | null)[] => {
@@ -171,12 +190,26 @@ const hasAnyNonCenterEmpty = computed(() => {
   return false;
 });
 
+function isOnlyCentersString(s: string): boolean {
+  if (s.length !== 54) return false;
+  for (let i = 0; i < 54; i++) {
+    if (LOCKED_CENTER.has(i)) continue;
+    if (!isEmptyCell(s[i]!)) return false;
+  }
+  return true;
+}
+
+/** 仅中心块有面色、其余 48 格均为未填（与「清空」结果一致） */
+const isOnlyCentersFacelets = computed(() => isOnlyCentersString(facelets.value));
+
 /** 与 `facelets` 一致且有效时，点击「随机其余」可直接应用的预计算结果（`randomFillRemainingByConstraintChainB` 输出） */
 const randomFillCacheSource = ref<string | null>(null);
 const randomFillCacheResult = ref<string | null>(null);
 const randomFillCachePending = ref(false);
 let randomFillPrewarmGen = 0;
 let randomFillWorker: Worker | null = null;
+/** 为 true 时下一次 `facelets` 变更后不跑「随机其余」预计算（仅用于「清空」） */
+const skipRandomFillPrewarmNext = ref(false);
 
 type RandomFillPrewarmWorkerMsg =
   | { type: 'done'; gen: number; snapshot: string; out: string }
@@ -231,6 +264,12 @@ onBeforeUnmount(() => {
 function scheduleRandomFillPrewarm() {
   const snapshot0 = facelets.value;
   if (snapshot0.length !== 54) {
+    randomFillCacheSource.value = null;
+    randomFillCacheResult.value = null;
+    randomFillCachePending.value = false;
+    return;
+  }
+  if (isOnlyCentersString(snapshot0)) {
     randomFillCacheSource.value = null;
     randomFillCacheResult.value = null;
     randomFillCachePending.value = false;
@@ -294,6 +333,10 @@ const randomFillApplyReady = computed(() => {
 
 /** 对当前 `facelets` 应用预计算的「随机其余」；缓存未就绪时同步计算（兜底） */
 function applyRandomFillRemainingByConstraintChain() {
+  if (isOnlyCentersFacelets.value) {
+    setRandomLegal();
+    return;
+  }
   if (!hasAnyNonCenterEmpty.value) return;
   pushUndoSnapshot();
   if (randomFillApplyReady.value && randomFillCacheResult.value !== null) {
@@ -304,7 +347,8 @@ function applyRandomFillRemainingByConstraintChain() {
   selectedCell.value = null;
 }
 
-const FACE_COLORS: Record<FaceId, string> = {
+/** 六面贴纸显示色（与面串中 U/D/L/R/F/B 记号对应）；改色立即作用于 3D 与选色条 */
+const DEFAULT_FACE_DISPLAY_COLORS: Record<FaceId, string> = {
   U: '#ffffff',
   D: '#ffd400',
   L: '#ff7a1a',
@@ -312,6 +356,16 @@ const FACE_COLORS: Record<FaceId, string> = {
   F: '#00c853',
   B: '#1e90ff',
 };
+
+const faceDisplayColors = ref<Record<FaceId, string>>({ ...DEFAULT_FACE_DISPLAY_COLORS });
+
+function setFaceDisplayColor(face: FaceId, hex: string) {
+  faceDisplayColors.value = { ...faceDisplayColors.value, [face]: hex };
+}
+
+function resetFaceDisplayColors() {
+  faceDisplayColors.value = { ...DEFAULT_FACE_DISPLAY_COLORS };
+}
 
 /** 关闭时不检测对应项；总览与其它约束仍按当前规则 */
 const checkCenterMultiset = ref(true);
@@ -325,40 +379,181 @@ const report = computed(() =>
 );
 const constraintRows = computed(() => buildConstraintRows(report.value));
 
-const HIDDEN_CONSTRAINT_IDS = new Set<ConstraintGroupId>(['len', 'charset', 'incomplete']);
-const visibleConstraintRows = computed(() =>
-  constraintRows.value.filter((r) => !HIDDEN_CONSTRAINT_IDS.has(r.id)),
-);
+type UserConstraintId =
+  | 'edge_position'
+  | 'corner_position'
+  | 'edge_flip'
+  | 'corner_twist'
+  | 'parity';
 
-/** 选中右侧某一约束时仅高亮该约束涉及的格；未选中时高亮全部违规格 */
-const selectedConstraintId = ref<ConstraintGroupId | null>(null);
+type UserConstraintRow = {
+  id: UserConstraintId;
+  title: string;
+  intro: string;
+  status: 'pass' | 'fail' | 'skipped';
+};
 
-const highlightIndices = computed(() => {
-  const id = selectedConstraintId.value;
-  if (id === null) return report.value.illegalCellIndices;
-  const row = constraintRows.value.find((r) => r.id === id);
-  if (!row || row.status === 'skipped') return new Set<number>();
-  return new Set(row.cellIndices);
-});
+type CheckStatus = 'pass' | 'fail' | 'skipped';
 
-function toggleConstraintHighlight(id: ConstraintGroupId) {
-  const row = constraintRows.value.find((r) => r.id === id);
-  if (!row || row.status === 'skipped') return;
-  if (selectedConstraintId.value === id) {
-    selectedConstraintId.value = null;
-    return;
-  }
-  selectedConstraintId.value = id;
+/** 用户向 5 条：文案固定；状态由底层校验行聚合；高亮合并对应组的 cellIndices */
+const USER_CONSTRAINT_SPEC: readonly {
+  id: UserConstraintId;
+  title: string;
+  intro: string;
+  sourceIds: readonly ConstraintGroupId[];
+}[] = [
+  {
+    id: 'edge_position',
+    title: '棱块位置',
+    intro: '12个棱块的排列位置。',
+    sourceIds: ['edge_local', 'perm_a'],
+  },
+  {
+    id: 'corner_position',
+    title: '角块位置',
+    intro: '8个角块的排列位置。',
+    sourceIds: ['corner_local', 'perm_a'],
+  },
+  {
+    id: 'edge_flip',
+    title: '棱块翻转',
+    intro: '棱块翻转的次数是偶数。',
+    sourceIds: ['flip_c'],
+  },
+  {
+    id: 'corner_twist',
+    title: '角块扭转',
+    intro: '角块扭转的次数是3的倍数。',
+    sourceIds: ['twist_b'],
+  },
+  {
+    id: 'parity',
+    title: '棱角奇偶',
+    intro: '棱块位置交换次数=角块位置交换次数，即同为奇数或偶数。',
+    sourceIds: ['parity_incomplete', 'parity_d'],
+  },
+];
+
+function statusOf(rows: readonly ConstraintRow[], id: ConstraintGroupId): CheckStatus {
+  return rows.find((r) => r.id === id)?.status ?? 'skipped';
 }
 
-function onStickerClick(globalIdx: number) {
+function combineTwo(a: CheckStatus, b: CheckStatus): CheckStatus {
+  if (a === 'fail' || b === 'fail') return 'fail';
+  if (a === 'skipped' && b === 'skipped') return 'skipped';
+  if (a === 'skipped') return b;
+  if (b === 'skipped') return a;
+  return a === 'pass' && b === 'pass' ? 'pass' : 'fail';
+}
+
+function aggregateStatus(rows: readonly ConstraintRow[], ids: readonly ConstraintGroupId[]): CheckStatus {
+  let acc: CheckStatus = 'skipped';
+  for (const id of ids) {
+    acc = combineTwo(acc, statusOf(rows, id));
+  }
+  return acc;
+}
+
+function mergeCellIndicesForSources(
+  rows: readonly ConstraintRow[],
+  ids: readonly ConstraintGroupId[],
+): Set<number> {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const s = new Set<number>();
+  for (const id of ids) {
+    const r = byId.get(id);
+    if (r) for (const i of r.cellIndices) s.add(i);
+  }
+  return s;
+}
+
+const userConstraintRows = computed((): UserConstraintRow[] => {
+  const rows = constraintRows.value;
+  const base = USER_CONSTRAINT_SPEC.map((spec) => ({
+    id: spec.id,
+    title: spec.title,
+    intro: spec.intro,
+    status: aggregateStatus(rows, spec.sourceIds),
+  }));
+  const edgeFlip = base.find((r) => r.id === 'edge_flip');
+  const cornerTwist = base.find((r) => r.id === 'corner_twist');
+  if (edgeFlip?.status === 'fail' || cornerTwist?.status === 'fail') {
+    return base.map((r) =>
+      r.id === 'parity' ? { ...r, status: 'skipped' as const } : r,
+    );
+  }
+  return base;
+});
+
+const constraintsPanelOpen = ref(false);
+
+/** 仅当选中某一用户约束时在 3D 上高亮对应格；默认不高亮 */
+const selectedUserConstraintId = ref<UserConstraintId | null>(null);
+
+watch(constraintsPanelOpen, (open) => {
+  if (!open) selectedUserConstraintId.value = null;
+});
+
+watch(
+  () => userConstraintRows.value.find((r) => r.id === 'parity')?.status,
+  (parityStatus) => {
+    if (parityStatus === 'skipped' && selectedUserConstraintId.value === 'parity') {
+      selectedUserConstraintId.value = null;
+    }
+  },
+);
+
+const highlightIndices = computed(() => {
+  const uid = selectedUserConstraintId.value;
+  if (uid === null) return new Set<number>();
+  const spec = USER_CONSTRAINT_SPEC.find((s) => s.id === uid);
+  const urow = userConstraintRows.value.find((r) => r.id === uid);
+  if (!spec || !urow || urow.status === 'skipped') return new Set<number>();
+  return mergeCellIndicesForSources(constraintRows.value, spec.sourceIds);
+});
+
+function toggleUserConstraintHighlight(id: UserConstraintId) {
+  const urow = userConstraintRows.value.find((r) => r.id === id);
+  if (!urow || urow.status === 'skipped') return;
+  if (selectedUserConstraintId.value === id) {
+    selectedUserConstraintId.value = null;
+    return;
+  }
+  selectedUserConstraintId.value = id;
+}
+
+/** 点击约束抽屉内除约束条按钮外的区域时取消选中 */
+function onConstraintsDrawerBackgroundClick(ev: MouseEvent) {
+  const t = ev.target as HTMLElement | null;
+  if (t?.closest('button.constraint')) return;
+  selectedUserConstraintId.value = null;
+}
+
+function onStickerClick(globalIdx: number, clientX: number, clientY: number) {
   if (LOCKED_CENTER.has(globalIdx)) return;
   if (selectedCell.value === globalIdx) {
     selectedCell.value = null;
     return;
   }
   selectedCell.value = globalIdx;
+  pickerPointerPos.value = { x: clientX, y: clientY };
 }
+
+function onStickerPointerMiss() {
+  clearSelection();
+}
+
+watchEffect((onCleanup) => {
+  if (selectedCell.value === null) return;
+  const onDocPointerDown = (e: PointerEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el?.closest('.picker')) return;
+    if (el?.closest('.cube-3d')) return;
+    clearSelection();
+  };
+  document.addEventListener('pointerdown', onDocPointerDown, true);
+  onCleanup(() => document.removeEventListener('pointerdown', onDocPointerDown, true));
+});
 
 function applyPick(value: FaceId | null) {
   if (selectedCell.value === null) return;
@@ -386,18 +581,10 @@ function setRandomLegal() {
   selectedCell.value = null;
 }
 
-function exampleCornerTwist() {
-  pushUndoSnapshot();
-  const s = solvedString().split('');
-  s[8] = 'F';
-  s[10] = 'U';
-  s[20] = 'R';
-  facelets.value = s.join('');
-}
-
 /** 除六个中心外全部置为未填 */
 function clearExceptCenters() {
   pushUndoSnapshot();
+  skipRandomFillPrewarmNext.value = true;
   const solved = solvedString();
   const arr: string[] = Array.from({ length: 54 }, () => EMPTY_FACELET);
   for (const i of CENTER_INDICES) {
@@ -437,18 +624,120 @@ const faceletsComplete = computed(() => {
   return true;
 });
 
+const randomPopoverOpen = ref(false);
+
+const canUseRandomButton = computed(() => facelets.value.length === 54);
+
+function onRandomMainButtonClick() {
+  if (!canUseRandomButton.value) return;
+  if (faceletsComplete.value || isOnlyCentersFacelets.value) {
+    randomPopoverOpen.value = false;
+    setRandomLegal();
+    return;
+  }
+  if (randomPopoverOpen.value) {
+    randomPopoverOpen.value = false;
+    return;
+  }
+  randomPopoverOpen.value = true;
+}
+
+function onRandomPopoverPickAll() {
+  randomPopoverOpen.value = false;
+  setRandomLegal();
+}
+
+function onRandomPopoverPickRest() {
+  randomPopoverOpen.value = false;
+  applyRandomFillRemainingByConstraintChain();
+}
+
+watchEffect((onCleanup) => {
+  if (!randomPopoverOpen.value) return;
+  const onDoc = (e: PointerEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el?.closest('.toolbar__random-wrap')) return;
+    randomPopoverOpen.value = false;
+  };
+  document.addEventListener('pointerdown', onDoc, true);
+  onCleanup(() => document.removeEventListener('pointerdown', onDoc, true));
+});
+
+/** 「随机」主按钮尺寸：浮层宽与按钮同宽（原 w-2 再加宽 2px）；次行「未选」等高叠在下方；left/top 4px/4px */
+const randomBtnRef = ref<HTMLButtonElement | null>(null);
+const randomBtnPx = ref({ w: 0, h: 0 });
+
+function measureRandomBtnSize() {
+  const el = randomBtnRef.value;
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  randomBtnPx.value = { w: r.width, h: r.height };
+}
+
+const randomPopoverBoxStyle = computed(() => {
+  const { w, h } = randomBtnPx.value;
+  if (w <= 0 || h <= 0) {
+    return { left: '4px', top: '4px', boxSizing: 'border-box' as const };
+  }
+  const row = h - 2;
+  return {
+    left: '4px',
+    top: '4px',
+    width: `${w}px`,
+    height: `${row * 2}px`,
+    boxSizing: 'border-box' as const,
+  };
+});
+
+const randomBtnResizeObserver = new ResizeObserver(() => measureRandomBtnSize());
+
+watch(
+  randomBtnRef,
+  (el) => {
+    randomBtnResizeObserver.disconnect();
+    if (el) {
+      randomBtnResizeObserver.observe(el);
+      void nextTick(() => measureRandomBtnSize());
+    }
+  },
+  { immediate: true, flush: 'post' },
+);
+
+onBeforeUnmount(() => {
+  randomBtnResizeObserver.disconnect();
+});
+
 const solverInitialized = ref(false);
 const solverLoading = ref(false);
 const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
 const solutionMoves = ref<string[]>([]);
 const solutionStepIndex = ref(0);
+/** 逆向演示：尚未执行首次「下一步」复位时为 true，之后每步施转列表中一步 */
+const reverseAwaitingFirstNext = ref(false);
+const solutionIsReverse = ref(false);
+const reverseDemoTargetFacelets = ref<string | null>(null);
+const solutionAnimating = ref(false);
 /** 为 true 时下一次 `facelets` 变更来自「下一步」演示，不应清空解法或 reset 3D */
 const skipInvalidationForSolutionStep = ref(false);
 const nextHintMove = computed(() => {
   if (solutionMoves.value.length === 0) return null;
+  if (solutionIsReverse.value) {
+    if (reverseAwaitingFirstNext.value) return null;
+    if (solutionStepIndex.value >= solutionMoves.value.length) return null;
+    return solutionMoves.value[solutionStepIndex.value] ?? null;
+  }
   if (solutionStepIndex.value >= solutionMoves.value.length) return null;
   return solutionMoves.value[solutionStepIndex.value] ?? null;
+});
+
+const canAdvanceSolutionStep = computed(() => {
+  if (solutionMoves.value.length === 0) return false;
+  if (solutionIsReverse.value) {
+    if (reverseAwaitingFirstNext.value) return true;
+    return solutionStepIndex.value < solutionMoves.value.length;
+  }
+  return solutionStepIndex.value < solutionMoves.value.length;
 });
 
 function clearSolutionState() {
@@ -456,6 +745,9 @@ function clearSolutionState() {
   solutionStepIndex.value = 0;
   solverError.value = null;
   solverBanner.value = null;
+  solutionIsReverse.value = false;
+  reverseAwaitingFirstNext.value = false;
+  reverseDemoTargetFacelets.value = null;
 }
 
 async function fetchSolution() {
@@ -479,27 +771,127 @@ async function fetchSolution() {
     if (c.isSolved()) {
       solutionMoves.value = [];
       solutionStepIndex.value = 0;
+      solutionIsReverse.value = false;
+      reverseAwaitingFirstNext.value = false;
+      reverseDemoTargetFacelets.value = null;
       solverBanner.value = '当前已是标准还原态，无需转动步骤。';
       return;
     }
     const alg = c.solve();
+    solutionIsReverse.value = false;
+    reverseAwaitingFirstNext.value = false;
+    reverseDemoTargetFacelets.value = null;
     solutionMoves.value = splitAlgorithm(alg);
     solutionStepIndex.value = 0;
   } catch (e) {
     solverError.value = e instanceof Error ? e.message : String(e);
     solutionMoves.value = [];
     solutionStepIndex.value = 0;
+    solutionIsReverse.value = false;
+    reverseAwaitingFirstNext.value = false;
+    reverseDemoTargetFacelets.value = null;
+  } finally {
+    solverLoading.value = false;
+  }
+}
+
+async function fetchReverseSolution() {
+  solverError.value = null;
+  solverBanner.value = null;
+  if (!faceletsComplete.value) {
+    solverError.value = '请先填满 54 格。';
+    return;
+  }
+  if (!report.value.ok) {
+    solverError.value = '当前染色不满足可解条件，无法计算步骤。';
+    return;
+  }
+  solverLoading.value = true;
+  try {
+    if (!solverInitialized.value) {
+      Cube.initSolver();
+      solverInitialized.value = true;
+    }
+    const snapshot = facelets.value;
+    const c = Cube.fromString(snapshot);
+    if (c.isSolved()) {
+      solutionMoves.value = [];
+      solutionStepIndex.value = 0;
+      solutionIsReverse.value = false;
+      reverseAwaitingFirstNext.value = false;
+      reverseDemoTargetFacelets.value = null;
+      solverBanner.value = '当前已是标准还原态，从还原态到当前态无转动步骤。';
+      return;
+    }
+    const alg = c.solve();
+    reverseDemoTargetFacelets.value = snapshot;
+    solutionIsReverse.value = true;
+    reverseAwaitingFirstNext.value = true;
+    solutionMoves.value = invertAlgorithmMoves(splitAlgorithm(alg));
+    solutionStepIndex.value = 0;
+  } catch (e) {
+    solverError.value = e instanceof Error ? e.message : String(e);
+    solutionMoves.value = [];
+    solutionStepIndex.value = 0;
+    solutionIsReverse.value = false;
+    reverseAwaitingFirstNext.value = false;
+    reverseDemoTargetFacelets.value = null;
   } finally {
     solverLoading.value = false;
   }
 }
 
 async function nextSolutionStep() {
+  if (solutionAnimating.value) return;
+  const view = cube3dRef.value;
+  if (!view) return;
+
+  if (solutionIsReverse.value) {
+    if (solutionMoves.value.length === 0) return;
+    if (!reverseAwaitingFirstNext.value && solutionStepIndex.value >= solutionMoves.value.length) {
+      return;
+    }
+    solutionAnimating.value = true;
+    try {
+      if (reverseAwaitingFirstNext.value) {
+        pushUndoSnapshot();
+        skipInvalidationForSolutionStep.value = true;
+        facelets.value = solvedString();
+        await nextTick();
+        view.resetLayout();
+        reverseAwaitingFirstNext.value = false;
+      } else {
+        const move = solutionMoves.value[solutionStepIndex.value]!;
+        const before = facelets.value;
+        await view.animateMove(move);
+        pushUndoSnapshot();
+        const c = Cube.fromString(before);
+        c.move(move);
+        skipInvalidationForSolutionStep.value = true;
+        facelets.value = c.asString();
+        solutionStepIndex.value += 1;
+        const target = reverseDemoTargetFacelets.value;
+        if (
+          target &&
+          solutionStepIndex.value === solutionMoves.value.length &&
+          facelets.value !== target
+        ) {
+          solverError.value =
+            '逆向演示结束态与目标不一致（内部错误）；请重新获取逆向步骤。';
+        }
+      }
+    } catch (e) {
+      solverError.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      solutionAnimating.value = false;
+    }
+    return;
+  }
+
   if (solutionMoves.value.length === 0) return;
   if (solutionStepIndex.value >= solutionMoves.value.length) return;
   const move = solutionMoves.value[solutionStepIndex.value]!;
-  const view = cube3dRef.value;
-  if (!view) return;
+  solutionAnimating.value = true;
   try {
     const before = facelets.value;
     await view.animateMove(move);
@@ -511,12 +903,13 @@ async function nextSolutionStep() {
     solutionStepIndex.value += 1;
   } catch (e) {
     solverError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    solutionAnimating.value = false;
   }
 }
 
-const semiTransparent = ref(false);
-/** 半透明模式下贴纸与黑缝边框共用不透明度（0.1–1） */
-const stickerOpacity = ref(0.42);
+/** 3D 贴纸与黑框不透明度（0.1–1），始终生效 */
+const stickerOpacity = ref(1);
 
 const opacityPercent = computed(() => Math.round(stickerOpacity.value * 100));
 
@@ -529,7 +922,15 @@ function invalidateSolutionAndReset3D() {
 }
 
 watch(facelets, () => {
-  scheduleRandomFillPrewarm();
+  if (skipRandomFillPrewarmNext.value) {
+    skipRandomFillPrewarmNext.value = false;
+    randomFillPrewarmGen += 1;
+    randomFillCacheSource.value = null;
+    randomFillCacheResult.value = null;
+    randomFillCachePending.value = false;
+  } else {
+    scheduleRandomFillPrewarm();
+  }
   if (skipInvalidationForSolutionStep.value) {
     skipInvalidationForSolutionStep.value = false;
     return;
@@ -674,31 +1075,52 @@ function applySelectedParityIncompleteEnumeration() {
 
 <template>
   <div class="page">
-    <header class="header">
-      <h1>3×3 魔方合法性校验</h1>
-      <p class="lead">
-        依据色数守恒、中心唯一、棱/角块身份与唯一性、几何一致（手性/朝向）、以及角扭转 mod 3（完全/非完全填充分支）、棱翻转偶性（完全/非完全）、置换奇偶（约束 A–D）检验；全局项由 `buildCube` 解析（未决为 -1）。右侧可逐项查看状态，点击某项可单独高亮相关贴纸。
-      </p>
-    </header>
-
     <div class="toolbar">
-      <button type="button" @click="setSolved">还原态</button>
-      <button type="button" @click="setRandomLegal">随机合法态</button>
-      <button
-        type="button"
-        class="toolbar__primary"
-        :disabled="!hasAnyNonCenterEmpty"
-        :title="
-          randomFillCachePending
-            ? '正在根据当前面串预计算「随机其余」结果…'
-            : randomFillApplyReady
-              ? '已预计算：点击立即套用（跳过中心，先唯一候选再随机直至无法推进）'
-              : '面串已变，预计算未完成或已过期：点击将现场计算（可能较慢）。改色、清空、撤销、填充唯一候选、应用到魔方后会自动在后台重算。'
-        "
-        @click="applyRandomFillRemainingByConstraintChain"
-      >
-        {{ randomFillCachePending ? '随机其余…' : '随机其余' }}
-      </button>
+      <button type="button" @click="setSolved">还原</button>
+      <div class="toolbar__random-wrap">
+        <button
+          ref="randomBtnRef"
+          type="button"
+          class="toolbar__primary"
+          :disabled="!canUseRandomButton"
+          :title="
+            faceletsComplete
+              ? '54 面均已填色：点击直接替换为 cubejs 随机合法态'
+              : isOnlyCentersFacelets
+                ? '六面仅中心有面色：点击直接整态随机'
+                : '未填满：点击展开后可选「全部」整态随机或「未选」保留已填色补全'
+          "
+          @click="onRandomMainButtonClick"
+        >
+          随机
+        </button>
+        <Transition name="mac-float">
+          <div
+            v-if="randomPopoverOpen"
+            class="random-popover mac-float-surface"
+            :style="randomPopoverBoxStyle"
+            role="menu"
+            aria-label="随机方式"
+          >
+            <button
+              type="button"
+              class="random-popover__btn"
+              role="menuitem"
+              @click="onRandomPopoverPickAll"
+            >
+              全部
+            </button>
+            <button
+              type="button"
+              class="random-popover__btn"
+              role="menuitem"
+              @click="onRandomPopoverPickRest"
+            >
+              未选
+            </button>
+          </div>
+        </Transition>
+      </div>
       <button type="button" class="muted" @click="clearExceptCenters">清空</button>
       <button
         type="button"
@@ -707,7 +1129,7 @@ function applySelectedParityIncompleteEnumeration() {
         title="撤销上一步改色、载入或演示步"
         @click="undoFacelets"
       >
-        撤销 ↩️
+        撤销
       </button>
       <button
         type="button"
@@ -718,19 +1140,26 @@ function applySelectedParityIncompleteEnumeration() {
       >
         填充唯一候选
       </button>
-      <button type="button" class="muted" @click="exampleCornerTwist">示例：角块乱向</button>
       <button
         type="button"
         class="toolbar__primary"
-        :disabled="solverLoading || !faceletsComplete || !report.ok"
+        :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
         @click="fetchSolution"
       >
-        {{ solverLoading ? '正在初始化求解器…' : '获取解法' }}
+        {{ solverLoading ? '正在初始化求解器…' : '步骤' }}
       </button>
       <button
         type="button"
         class="toolbar__primary"
-        :disabled="!nextHintMove || solverLoading"
+        :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
+        @click="fetchReverseSolution"
+      >
+        {{ solverLoading ? '正在初始化求解器…' : '逆向步骤' }}
+      </button>
+      <button
+        type="button"
+        class="toolbar__primary"
+        :disabled="!canAdvanceSolutionStep || solverLoading || solutionAnimating"
         @click="nextSolutionStep"
       >
         下一步
@@ -740,220 +1169,201 @@ function applySelectedParityIncompleteEnumeration() {
     <p v-else-if="solverBanner" class="solver-banner">{{ solverBanner }}</p>
     <div v-else-if="solutionMoves.length > 0" class="solver-info">
       <p class="solver-info__lead">
-        还原步骤：已执行 {{ solutionStepIndex }} / {{ solutionMoves.length }}；点击「下一步」按序演示；当前步
-        <strong v-if="nextHintMove">{{ nextHintMove }}</strong>
-        <span v-else>（已完成）</span>
+        <template v-if="solutionIsReverse">
+          逆向步骤（还原态 → 获取时的状态）：列表步已执行 {{ solutionStepIndex }} /
+          {{ solutionMoves.length }}；首次「下一步」仅恢复还原态，之后每步施转一字。
+          <template v-if="reverseAwaitingFirstNext">下一步将<strong>恢复还原态</strong>。</template>
+          <template v-else-if="nextHintMove">
+            当前步 <strong>{{ nextHintMove }}</strong>
+          </template>
+          <template v-else>（已完成）</template>
+        </template>
+        <template v-else>
+          还原步骤：已执行 {{ solutionStepIndex }} / {{ solutionMoves.length }}；点击「下一步」按序演示；当前步
+          <strong v-if="nextHintMove">{{ nextHintMove }}</strong>
+          <span v-else>（已完成）</span>
+        </template>
       </p>
-      <ol class="solver-steps" aria-label="完整还原步骤序列">
+      <ol
+        class="solver-steps"
+        :aria-label="solutionIsReverse ? '从还原态到目标态的转动序列' : '完整还原步骤序列'"
+      >
         <li
           v-for="(m, i) in solutionMoves"
           :key="`${i}-${m}`"
           class="solver-steps__item"
           :class="{
-            'solver-steps__item--done': i < solutionStepIndex,
-            'solver-steps__item--current': i === solutionStepIndex,
-            'solver-steps__item--pending': i > solutionStepIndex,
+            'solver-steps__item--done':
+              solutionIsReverse
+                ? !reverseAwaitingFirstNext && i < solutionStepIndex
+                : i < solutionStepIndex,
+            'solver-steps__item--current':
+              solutionIsReverse
+                ? !reverseAwaitingFirstNext &&
+                  i === solutionStepIndex &&
+                  solutionStepIndex < solutionMoves.length
+                : i === solutionStepIndex,
+            'solver-steps__item--pending':
+              solutionIsReverse
+                ? reverseAwaitingFirstNext ||
+                  i > solutionStepIndex ||
+                  (i === solutionStepIndex && solutionStepIndex >= solutionMoves.length)
+                : i > solutionStepIndex,
           }"
         >
           <span class="solver-steps__move">{{ m }}</span>
         </li>
       </ol>
     </div>
-    <p v-else-if="faceletsComplete && report.ok" class="solver-hint muted">
-      填色完整且校验通过时可点击「获取解法」（首次需数秒加载两阶段算法表）。
-    </p>
-
-    <section class="facelets54 cube-json card" aria-label="编辑 54 位面串 facelets54">
-      <h2 class="cube-json__title"><code>facelets54</code>（输入）</h2>
-      <p class="facelets54__len">
-        忽略空白后长度 {{ facelets54CompactLen }}（规范为 54）；顺序与 cubejs 一致：<strong>U R F D L B</strong> 各 9 格，未填为
-        <strong>{{ EMPTY_FACELET }}</strong>。
-      </p>
+    <section class="facelets54 card" aria-label="编辑 54 位面串">
       <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
-      <textarea
-        ref="facelets54InputRef"
-        v-model="facelets54Draft"
-        class="facelets54__textarea"
-        rows="4"
-        spellcheck="false"
-        aria-label="facelets54 文本输入"
-      />
-      <div class="facelets54__actions">
-        <button type="button" class="toolbar__primary" @click="applyFacelets54FromInput">
-          应用到魔方
-        </button>
+      <div class="facelets54__row">
+        <div class="facelets54__left">
+          <div class="facelets54__input-wrap">
+            <textarea
+              ref="facelets54InputRef"
+              v-model="facelets54Draft"
+              class="facelets54__textarea"
+              rows="1"
+              spellcheck="false"
+              wrap="off"
+              :aria-label="`facelets54 文本输入，${facelets54CompactLen}/54 字符`"
+            />
+            <span class="facelets54__counter">{{ facelets54CompactLen }}/54</span>
+          </div>
+          <div class="facelets54__actions">
+            <button type="button" class="toolbar__primary" @click="applyFacelets54FromInput">
+              应用
+            </button>
+          </div>
+        </div>
+        <div class="facelets54__theme-side">
+          <div class="face-theme" aria-label="六面显示色">
+            <div class="face-theme__row" role="group">
+              <label
+                v-for="f in FACES"
+                :key="f"
+                class="face-theme__swatch"
+                :title="`${f} 面显示色`"
+              >
+                <span class="face-theme__tile" :style="{ backgroundColor: faceDisplayColors[f] }" />
+                <span class="face-theme__lbl">{{ f }}</span>
+                <input
+                  class="face-theme__color"
+                  type="color"
+                  :value="faceDisplayColors[f]"
+                  @input="setFaceDisplayColor(f, ($event.target as HTMLInputElement).value)"
+                />
+              </label>
+            </div>
+            <button type="button" class="face-theme__reset" @click="resetFaceDisplayColors">
+              重置
+            </button>
+          </div>
+          <label class="semi-opacity">
+            <span class="semi-opacity__label">3D 透明度</span>
+            <input
+              v-model.number="stickerOpacity"
+              class="semi-opacity__range"
+              type="range"
+              min="0.1"
+              max="1"
+              step="0.02"
+              aria-valuemin="0.1"
+              aria-valuemax="1"
+              :aria-valuenow="stickerOpacity"
+              aria-label="三维魔方贴纸与黑框不透明度"
+            />
+            <span class="semi-opacity__value" aria-hidden="true">{{ opacityPercent }}%</span>
+          </label>
+        </div>
       </div>
     </section>
 
     <div class="layout">
       <section class="view-3d" aria-label="三维魔方">
-        <div class="view-3d__head">
-          <p class="hint">
-            <strong>拖拽</strong>旋转视角（仅移动相机）；<strong>点击</strong>非中心贴纸后在下方选色（含「空」）；中心块固定不可改。填齐后可「获取解法」，工具栏下列出全部还原步，按「下一步」播放单层旋转（含中心块随动）；蓝色箭头提示当前步转动方向。
-          </p>
-          <div class="semi-controls">
-            <button
-              type="button"
-              class="btn-semi"
-              :class="{ 'btn-semi--active': semiTransparent }"
-              :aria-pressed="semiTransparent"
-              @click="semiTransparent = !semiTransparent"
-            >{{ semiTransparent ? '不透明' : '半透明' }}</button>
-            <label v-if="semiTransparent" class="semi-opacity">
-              <span class="semi-opacity__label">透明度</span>
-              <input
-                v-model.number="stickerOpacity"
-                class="semi-opacity__range"
-                type="range"
-                min="0.1"
-                max="1"
-                step="0.02"
-                aria-valuemin="0.1"
-                aria-valuemax="1"
-                :aria-valuenow="stickerOpacity"
-                aria-label="贴纸与黑框不透明度"
-              />
-              <span class="semi-opacity__value" aria-hidden="true">{{ opacityPercent }}</span>
-            </label>
-          </div>
-        </div>
         <Cube3DView
           ref="cube3dRef"
           :facelets="facelets"
-          :face-colors="FACE_COLORS"
+          :face-colors="faceDisplayColors"
           :highlight-indices="highlightIndices"
           :locked-indices="LOCKED_CENTER"
           :selected-index="selectedCell"
           :next-hint-move="nextHintMove"
-          :semi-transparent="semiTransparent"
+          :semi-transparent="true"
           :sticker-opacity="stickerOpacity"
           @sticker-click="onStickerClick"
+          @sticker-pointer-miss="onStickerPointerMiss"
         />
 
-        <div v-if="selectedCell !== null" class="picker card">
-          <div class="picker__head">
-            <span>已选格 <strong>#{{ selectedCell }}</strong></span>
-            <button type="button" class="picker__close" @click="clearSelection">关闭</button>
+        <Transition name="mac-float">
+          <div
+            v-if="selectedCell !== null"
+            class="picker-anchor"
+            :style="pickerFloatingStyle"
+          >
+            <div class="picker picker--floating card mac-float-surface">
+              <ColorCandidateBar
+                :candidates="pickerBarCandidates"
+                :face-colors="faceDisplayColors"
+                :constraint-allowed-faces="constraintAllowedFacesForPicker"
+                :disable-empty-chip="pickerDisableEmptyChip"
+                @pick="applyPick"
+              />
+            </div>
           </div>
-          <p class="picker__sub">
-            六种面色与「空」均展示；带「禁」且灰显者表示当前格代入后可能无法通过约束链（棱/角局部、棱翻转、角扭转、置换奇偶-非完全填充），仍可点击强制选色。
-          </p>
-          <ColorCandidateBar
-            :candidates="pickerBarCandidates"
-            :face-colors="FACE_COLORS"
-            :constraint-allowed-faces="constraintAllowedFacesForPicker"
-            :disable-empty-chip="pickerDisableEmptyChip"
-            @pick="applyPick"
-          />
-        </div>
+        </Transition>
       </section>
 
-      <aside class="panel panel--constraints">
-        <div class="status" :class="report.ok ? 'status--ok' : 'status--bad'">
-          {{ report.ok ? '当前状态：合法（可解必要条件均满足）' : '当前状态：存在非法项或未填色' }}
-        </div>
-        <p class="constraint-hint">点击某项：仅高亮不满足该约束的贴纸；再点一次取消筛选。</p>
-        <ul class="constraints" role="list">
-          <li v-for="row in visibleConstraintRows" :key="row.id">
-            <div
-              v-if="row.id === 'center_multiset' || row.id === 'facelet_match'"
-              class="constraint-row"
-            >
-              <label
-                v-if="row.id === 'center_multiset'"
-                class="constraint-switch"
-                @click.stop
-              >
-                <input
-                  v-model="checkCenterMultiset"
-                  type="checkbox"
-                  class="constraint-switch__input"
-                />
-                <span class="constraint-switch__lbl">检测</span>
-              </label>
-              <label
-                v-else-if="row.id === 'facelet_match'"
-                class="constraint-switch"
-                @click.stop
-              >
-                <input
-                  v-model="checkFaceletMismatch"
-                  type="checkbox"
-                  class="constraint-switch__input"
-                />
-                <span class="constraint-switch__lbl">检测</span>
-              </label>
+      <aside
+        class="panel panel--constraints"
+        :class="{ 'panel--constraints--collapsed': !constraintsPanelOpen }"
+        aria-label="约束说明"
+      >
+        <button
+          type="button"
+          class="constraints-toggle"
+          :aria-expanded="constraintsPanelOpen"
+          @click="constraintsPanelOpen = !constraintsPanelOpen"
+        >
+          约束
+        </button>
+        <div
+          v-show="constraintsPanelOpen"
+          class="constraints-drawer"
+          @click="onConstraintsDrawerBackgroundClick"
+        >
+          <div class="status" :class="report.ok ? 'status--ok' : 'status--bad'">
+            {{ report.ok ? '当前状态：合法（可解必要条件均满足）' : '当前状态：存在非法项或未填色' }}
+          </div>
+          <ul class="constraints" role="list">
+            <li v-for="row in userConstraintRows" :key="row.id">
               <button
                 type="button"
-                class="constraint constraint-row__btn"
+                class="constraint"
                 :class="{
                   'constraint--pass': row.status === 'pass',
                   'constraint--fail': row.status === 'fail',
                   'constraint--skip': row.status === 'skipped',
-                  'constraint--active': selectedConstraintId === row.id,
+                  'constraint--active': selectedUserConstraintId === row.id,
                 }"
                 :disabled="row.status === 'skipped'"
-                :aria-pressed="selectedConstraintId === row.id"
-                @click="toggleConstraintHighlight(row.id)"
+                :aria-pressed="selectedUserConstraintId === row.id"
+                @click.stop="toggleUserConstraintHighlight(row.id)"
               >
                 <span class="constraint__status" :data-status="row.status">{{
                   row.status === 'pass' ? '通过' : row.status === 'fail' ? '未通过' : '未校验'
                 }}</span>
                 <span class="constraint__title">{{ row.title }}</span>
-                <span class="constraint__desc">{{ row.description }}</span>
-                <ul
-                  v-if="row.messages.length > 0"
-                  class="constraint__msgs"
-                  role="list"
-                  aria-label="本项校验说明"
-                >
-                  <li v-for="(msg, mi) in row.messages" :key="mi" class="constraint__msg">
-                    {{ msg }}
-                  </li>
-                </ul>
+                <span class="constraint__desc">{{ row.intro }}</span>
               </button>
-            </div>
-            <button
-              v-else
-              type="button"
-              class="constraint"
-              :class="{
-                'constraint--pass': row.status === 'pass',
-                'constraint--fail': row.status === 'fail',
-                'constraint--skip': row.status === 'skipped',
-                'constraint--active': selectedConstraintId === row.id,
-              }"
-              :disabled="row.status === 'skipped'"
-              :aria-pressed="selectedConstraintId === row.id"
-              @click="toggleConstraintHighlight(row.id)"
-            >
-              <span class="constraint__status" :data-status="row.status">{{
-                row.status === 'pass' ? '通过' : row.status === 'fail' ? '未通过' : '未校验'
-              }}</span>
-              <span class="constraint__title">{{ row.title }}</span>
-              <span class="constraint__desc">{{ row.description }}</span>
-              <ul
-                v-if="row.messages.length > 0"
-                class="constraint__msgs"
-                role="list"
-                aria-label="本项校验说明"
-              >
-                <li v-for="(msg, mi) in row.messages" :key="mi" class="constraint__msg">
-                  {{ msg }}
-                </li>
-              </ul>
-            </button>
-          </li>
-        </ul>
-        <p class="footnote">
-          Facelet 顺序：<strong>U R F D L B</strong>，与
-          <a href="https://github.com/ldez/cubejs" target="_blank" rel="noreferrer">cubejs</a>
-          一致。未填位用字符 <strong>{{ EMPTY_FACELET }}</strong>。几何与可解性说明见
-          <code>docs/GEOMETRIC_CONSTRAINTS.md</code>。
-        </p>
+            </li>
+          </ul>
+        </div>
       </aside>
     </div>
 
+    <template v-if="SHOW_DEV_CUBE_ENUM_JSON">
     <section class="edge-enum card" aria-label="棱块补全枚举">
       <h2 class="cube-json__title"><code>enumerateEdgeFillCubeStates</code></h2>
       <p class="edge-enum__hint">
@@ -975,7 +1385,7 @@ function applySelectedParityIncompleteEnumeration() {
           :disabled="selectedEdgeEnumIndex === null || edgeEnumEntries.length === 0"
           @click="applySelectedEdgeEnumeration"
         >
-          应用到魔方
+          应用
         </button>
       </div>
       <textarea
@@ -1010,7 +1420,7 @@ function applySelectedParityIncompleteEnumeration() {
           :disabled="selectedCornerEnumIndex === null || cornerEnumEntries.length === 0"
           @click="applySelectedCornerEnumeration"
         >
-          应用到魔方
+          应用
         </button>
       </div>
       <textarea
@@ -1053,7 +1463,7 @@ function applySelectedParityIncompleteEnumeration() {
           "
           @click="applySelectedParityIncompleteEnumeration"
         >
-          应用到魔方
+          应用
         </button>
       </div>
       <textarea
@@ -1076,11 +1486,17 @@ function applySelectedParityIncompleteEnumeration() {
       </p>
       <p v-else class="cube-json__err">{{ cubeJsonState.text }}</p>
     </section>
+    </template>
   </div>
 </template>
 
 <style scoped>
 .page {
+  --glass-bg: rgba(255, 255, 255, 0.42);
+  --glass-bg-strong: rgba(255, 255, 255, 0.58);
+  --glass-border: rgba(0, 0, 0, 0.1);
+  --glass-blur: blur(16px);
+
   max-width: 1200px;
   margin: 0 auto;
   padding: 1.5rem 1rem 3rem;
@@ -1093,21 +1509,8 @@ function applySelectedParityIncompleteEnumeration() {
     Arial,
     sans-serif;
   color: #1a1a1a;
-  background: #fafafa;
+  background: linear-gradient(165deg, #e4e9f2 0%, #f0f2f7 45%, #e8eaee 100%);
   min-height: 100vh;
-}
-
-.header h1 {
-  font-size: 1.5rem;
-  font-weight: 650;
-  margin: 0 0 0.5rem;
-}
-
-.lead {
-  margin: 0;
-  font-size: 0.95rem;
-  line-height: 1.55;
-  color: #444;
 }
 
 .toolbar {
@@ -1115,19 +1518,108 @@ function applySelectedParityIncompleteEnumeration() {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin: 1.25rem 0;
+  padding: 0.65rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.45) inset;
+}
+
+.toolbar__random-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  vertical-align: top;
+}
+
+.toolbar__random-wrap > .toolbar__primary {
+  width: 100%;
+}
+
+.random-popover {
+  position: absolute;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.random-popover__btn {
+  flex: 1 1 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0 0.28rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: #1a1a1a;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.12s;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
+}
+
+.random-popover__btn + .random-popover__btn {
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+}
+
+.random-popover__btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.mac-float-surface {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.48);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.06),
+    0 2px 8px rgba(0, 0, 0, 0.06),
+    0 12px 28px rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+}
+
+.mac-float-enter-active,
+.mac-float-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.mac-float-enter-from,
+.mac-float-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
 }
 
 .toolbar button {
   padding: 0.45rem 0.85rem;
   border-radius: 8px;
-  border: 1px solid #ccc;
-  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   cursor: pointer;
   font-size: 0.875rem;
 }
 
 .toolbar button:hover {
-  background: #f0f0f0;
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .toolbar .muted {
@@ -1141,7 +1633,7 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .toolbar__primary:hover:not(:disabled) {
-  background: #eff6ff !important;
+  background: rgba(239, 246, 255, 0.92) !important;
 }
 
 .toolbar__primary:disabled {
@@ -1150,19 +1642,31 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .solver-info,
-.solver-err,
-.solver-hint {
+.solver-err {
   margin: 0.35rem 0 0;
   font-size: 0.88rem;
   line-height: 1.45;
 }
 
 .solver-banner {
+  margin: 0.35rem 0 0;
+  padding: 0.45rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(22, 101, 52, 0.18);
   color: #166534;
+  background: rgba(232, 248, 239, 0.42);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .solver-info {
   color: #1e3a5f;
+  padding: 0.5rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .solver-info__lead {
@@ -1183,21 +1687,23 @@ function applySelectedParityIncompleteEnumeration() {
   margin: 0;
   padding: 0.12rem 0.45rem;
   border-radius: 4px;
-  border: 1px solid #bfdbfe;
-  background: #f8fafc;
+  border: 1px solid rgba(191, 219, 254, 0.65);
+  background: rgba(248, 250, 252, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   font-size: 0.82rem;
   font-variant-numeric: tabular-nums;
 }
 
 .solver-steps__item--done {
   color: #64748b;
-  border-color: #cbd5e1;
-  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.75);
+  background: rgba(241, 245, 249, 0.5);
 }
 
 .solver-steps__item--current {
-  border-color: #2563eb;
-  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.65);
+  background: rgba(239, 246, 255, 0.65);
   font-weight: 700;
   color: #1e40af;
 }
@@ -1208,15 +1714,17 @@ function applySelectedParityIncompleteEnumeration() {
 
 .solver-err {
   color: #a8281e;
-}
-
-.solver-hint.muted {
-  color: #666;
+  padding: 0.45rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(168, 40, 30, 0.22);
+  background: rgba(253, 236, 234, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .layout {
   display: grid;
-  grid-template-columns: 1fr minmax(300px, 420px);
+  grid-template-columns: 1fr minmax(min-content, 420px);
   gap: 1.5rem;
   align-items: start;
 }
@@ -1227,132 +1735,73 @@ function applySelectedParityIncompleteEnumeration() {
   }
 }
 
-.hint {
-  font-size: 0.85rem;
-  color: #555;
-  margin: 0 0 0.75rem;
-  line-height: 1.5;
-}
-
 .view-3d {
   min-width: 0;
 }
 
-.view-3d__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 0.65rem 1rem;
-  margin-bottom: 0.75rem;
-}
-
-.view-3d__head .hint {
-  flex: 1 1 14rem;
-  margin: 0;
-}
-
-.semi-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.85rem;
-}
-
 .semi-opacity {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.45rem 0.55rem;
   font-size: 0.78rem;
-  color: #555;
+  color: #3a3d47;
   user-select: none;
 }
 
 .semi-opacity__label {
   white-space: nowrap;
+  font-weight: 600;
 }
 
 .semi-opacity__range {
-  width: min(9rem, 32vw);
+  width: min(10rem, 36vw);
   vertical-align: middle;
   accent-color: #6366f1;
 }
 
 .semi-opacity__value {
-  min-width: 2.25rem;
+  min-width: 2.75rem;
   font-variant-numeric: tabular-nums;
-  color: #444;
+  font-weight: 650;
+  color: #2d3140;
 }
 
-.btn-semi {
-  flex-shrink: 0;
-  padding: 0.38rem 0.8rem;
-  border-radius: 8px;
-  border: 1px solid #c0c4cc;
-  background: rgba(255, 255, 255, 0.7);
-  backdrop-filter: blur(4px);
-  cursor: pointer;
-  font-size: 0.82rem;
-  color: #444;
-  transition:
-    background 0.15s,
-    border-color 0.15s,
-    color 0.15s;
-}
-
-.btn-semi:hover {
-  background: rgba(240, 242, 248, 0.9);
-  border-color: #a0a8be;
-}
-
-.btn-semi--active {
-  border-color: #6366f1;
-  color: #4338ca;
-  background: rgba(238, 238, 255, 0.85);
-}
-
-.picker {
-  margin-top: 1rem;
+.picker-anchor {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
 }
 
 .picker.card {
-  background: #fff;
-  border: 1px solid #e0e0e0;
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(0, 0, 0, 0.09);
   border-radius: 12px;
-  padding: 0.85rem 1rem 1rem;
+  padding: 0.65rem 0.75rem;
 }
 
-.picker__head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.35rem;
-  font-size: 0.9rem;
+.picker.card.mac-float-surface {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.4);
 }
 
-.picker__close {
-  padding: 0.25rem 0.55rem;
-  font-size: 0.8rem;
-  border-radius: 6px;
-  border: 1px solid #ccc;
-  background: #fafafa;
-  cursor: pointer;
-}
-
-.picker__close:hover {
-  background: #eee;
-}
-
-.picker__sub {
-  margin: 0 0 0.65rem;
-  font-size: 0.78rem;
-  color: #666;
+.picker--floating {
+  margin: 0;
+  max-width: min(96vw, 22rem);
+  transform: translate(14px, -10px) translateY(-100%);
+  pointer-events: auto;
 }
 
 .panel {
-  background: #fff;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-radius: 12px;
   padding: 1rem 1.1rem;
-  border: 1px solid #e5e5e5;
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
 }
 
 .panel--constraints {
@@ -1361,6 +1810,52 @@ function applySelectedParityIncompleteEnumeration() {
   max-height: calc(100vh - 2rem);
   display: flex;
   flex-direction: column;
+  align-items: stretch;
+  gap: 0.55rem;
+  min-height: 0;
+}
+
+.panel--constraints--collapsed {
+  max-height: none;
+  width: max-content;
+  max-width: 100%;
+  align-self: start;
+}
+
+.constraints-toggle {
+  flex-shrink: 0;
+  padding: 0.45rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(37, 99, 235, 0.45);
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #1e40af;
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+  align-self: flex-end;
+}
+
+.constraints-toggle:hover {
+  background: rgba(239, 246, 255, 0.75);
+}
+
+.panel--constraints--collapsed .constraints-toggle {
+  align-self: stretch;
+}
+
+.constraints-drawer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  min-width: min(100vw - 2rem, 280px);
+}
+
+.panel--constraints:not(.panel--constraints--collapsed) .constraints-drawer .constraints {
+  flex: 1;
   min-height: 0;
 }
 
@@ -1372,63 +1867,17 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .status--ok {
-  background: #e8f8ef;
+  background: rgba(232, 248, 239, 0.65);
   color: #1e7a45;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .status--bad {
-  background: #fdecea;
+  background: rgba(253, 236, 234, 0.65);
   color: #a8281e;
-}
-
-.constraint-hint {
-  margin: 0.65rem 0 0.5rem;
-  font-size: 0.75rem;
-  color: #666;
-  line-height: 1.45;
-}
-
-.constraint-row {
-  display: flex;
-  align-items: stretch;
-  gap: 0.35rem;
-}
-
-.constraint-switch {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 2.5rem;
-  padding: 0.35rem 0.2rem;
-  border-radius: 10px;
-  border: 1px solid #e0e0e0;
-  background: #f8f8f8;
-  cursor: pointer;
-  font-size: 0.65rem;
-  font-weight: 650;
-  color: #555;
-  user-select: none;
-}
-
-.constraint-switch:hover {
-  background: #f0f0f0;
-}
-
-.constraint-switch__input {
-  margin: 0 0 0.2rem;
-  cursor: pointer;
-}
-
-.constraint-switch__lbl {
-  line-height: 1.2;
-  text-align: center;
-}
-
-.constraint-row__btn {
-  flex: 1;
-  min-width: 0;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .constraints {
@@ -1448,8 +1897,10 @@ function applySelectedParityIncompleteEnumeration() {
   text-align: left;
   padding: 0.55rem 0.65rem;
   border-radius: 10px;
-  border: 1px solid #e8e8e8;
-  background: #fafafa;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(250, 250, 250, 0.45);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   cursor: pointer;
   font: inherit;
   display: flex;
@@ -1463,8 +1914,8 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .constraint:hover:not(:disabled) {
-  background: #f3f4f6;
-  border-color: #d8d8d8;
+  background: rgba(243, 244, 246, 0.72);
+  border-color: rgba(0, 0, 0, 0.12);
 }
 
 .constraint:disabled {
@@ -1475,7 +1926,7 @@ function applySelectedParityIncompleteEnumeration() {
 .constraint--active:not(:disabled) {
   border-color: #2563eb;
   box-shadow: 0 0 0 1px #2563eb;
-  background: #eff6ff;
+  background: rgba(239, 246, 255, 0.72);
 }
 
 .constraint__status {
@@ -1508,43 +1959,15 @@ function applySelectedParityIncompleteEnumeration() {
   color: #5c5c5c;
 }
 
-.constraint__msgs {
-  margin: 0.45rem 0 0;
-  padding-left: 1.1rem;
-  font-size: 0.72rem;
-  line-height: 1.45;
-  color: #444;
-  list-style: disc;
-}
-
-.constraint__msg {
-  margin: 0.12rem 0;
-}
-
-.footnote {
-  font-size: 0.75rem;
-  color: #777;
-  line-height: 1.5;
-  margin: 1rem 0 0;
-}
-
-.footnote code {
-  font-size: 0.72rem;
-  background: #f4f4f4;
-  padding: 0.1rem 0.25rem;
-  border-radius: 4px;
-}
-
-.footnote a {
-  color: #2563eb;
-}
-
 .edge-enum.card {
   margin-top: 1.5rem;
-  background: #fff;
-  border: 1px solid #e5e5e5;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 1rem 1.1rem 1.15rem;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
 }
 
 .edge-enum__hint {
@@ -1578,8 +2001,10 @@ function applySelectedParityIncompleteEnumeration() {
   min-width: 5.5rem;
   padding: 0.38rem 0.55rem;
   border-radius: 8px;
-  border: 1px solid #ccc;
-  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   font-size: 0.85rem;
 }
 
@@ -1593,8 +2018,10 @@ function applySelectedParityIncompleteEnumeration() {
   font-size: 0.72rem;
   line-height: 1.4;
   border-radius: 8px;
-  border: 1px solid #e8e9ec;
-  background: #f6f7f9;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: rgba(246, 247, 249, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: #1a1a1a;
   resize: vertical;
   min-height: 12rem;
@@ -1603,10 +2030,13 @@ function applySelectedParityIncompleteEnumeration() {
 
 .cube-json.card {
   margin-top: 1.5rem;
-  background: #fff;
-  border: 1px solid #e5e5e5;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 1rem 1.1rem 1.15rem;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
 }
 
 .cube-json__title {
@@ -1618,7 +2048,7 @@ function applySelectedParityIncompleteEnumeration() {
 
 .cube-json__title code {
   font-size: 0.82rem;
-  background: #f4f4f4;
+  background: rgba(244, 244, 244, 0.65);
   padding: 0.15rem 0.35rem;
   border-radius: 6px;
 }
@@ -1626,9 +2056,11 @@ function applySelectedParityIncompleteEnumeration() {
 .cube-json__pre {
   margin: 0;
   padding: 0.75rem 0.9rem;
-  background: #f6f7f9;
+  background: rgba(246, 247, 249, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-radius: 8px;
-  border: 1px solid #e8e9ec;
+  border: 1px solid rgba(0, 0, 0, 0.09);
   font-size: 0.78rem;
   line-height: 1.45;
   overflow: auto;
@@ -1647,34 +2079,83 @@ function applySelectedParityIncompleteEnumeration() {
   color: #a8281e;
 }
 
-.facelets54__len {
-  margin: 0 0 0.5rem;
-  font-size: 0.8rem;
-  color: #666;
+.facelets54.card {
+  margin-top: 1.5rem;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0.85rem 1rem 1rem;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+
+.facelets54__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 1rem 1.35rem;
+}
+
+.facelets54__theme-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.85rem 1.15rem;
+  flex: 0 1 auto;
+}
+
+.facelets54__left {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.facelets54__input-wrap {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .facelets54__textarea {
   box-sizing: border-box;
-  width: 100%;
-  margin: 0 0 0.65rem;
-  padding: 0.65rem 0.85rem;
+  display: block;
+  width: 54ch;
+  max-width: 100%;
+  height: 2.05rem;
+  min-height: 2.05rem;
+  margin: 0 0 0.5rem;
+  padding: 0.32rem 3.6rem 0.32rem 0.4rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.78rem;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-all;
-  border-radius: 8px;
-  border: 1px solid #c8cad0;
-  background: #fff;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  resize: none;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.52);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: #1a1a1a;
-  resize: vertical;
-  min-height: 5rem;
 }
 
 .facelets54__textarea:focus {
   outline: none;
   border-color: #5b7cfa;
   box-shadow: 0 0 0 2px rgba(91, 124, 250, 0.2);
+}
+
+.facelets54__counter {
+  position: absolute;
+  right: 0.38rem;
+  bottom: 0.42rem;
+  pointer-events: none;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(75, 78, 90, 0.95);
+  line-height: 1;
+  user-select: none;
 }
 
 .facelets54__actions {
@@ -1688,5 +2169,81 @@ function applySelectedParityIncompleteEnumeration() {
   margin: 0 0 0.5rem;
   font-size: 0.82rem;
   color: #a8281e;
+}
+
+.face-theme {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding-top: 0.1rem;
+}
+
+.face-theme__row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0.22rem;
+}
+
+.face-theme__swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.06rem;
+  width: 1.72rem;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.face-theme__tile {
+  width: 1.48rem;
+  height: 1.48rem;
+  border: 2px solid #141414;
+  border-radius: 2px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.face-theme__lbl {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #3a3a3a;
+  line-height: 1;
+  user-select: none;
+}
+
+.face-theme__color {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  width: 1.55rem;
+  height: 1.48rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.face-theme__reset {
+  padding: 0.32rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(250, 250, 250, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  font-size: 0.78rem;
+  color: #444;
+  cursor: pointer;
+}
+
+.face-theme__reset:hover {
+  background: rgba(238, 238, 238, 0.75);
 }
 </style>
