@@ -45,6 +45,8 @@ export type LegalityReport = {
     faceletMismatch?: boolean;
     centerMultiset?: boolean;
   };
+  /** 棱块（局部）匹配项通过时：活跃槽数 `a` 与完整指派方案数 `c`（无活跃槽或两格同色/对色时不设） */
+  edgeLocalPassSummary?: { a: number; c: number };
 };
 
 /** `validateLegality` 可选参数 */
@@ -74,6 +76,8 @@ export type ConstraintRow = {
   description: string;
   status: 'pass' | 'fail' | 'skipped';
   cellIndices: number[];
+  /** 本组 `codes` 命中的 `LegalityIssue.message`，与 push 文案一致 */
+  messages: readonly string[];
 };
 
 /** 固定顺序：与校验流程一致，用于右侧展示 */
@@ -173,6 +177,42 @@ function mergeCodesForGroup(issues: LegalityIssue[], codes: readonly string[]): 
   return [...set];
 }
 
+function messagesForGroup(issues: LegalityIssue[], codes: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const iss of issues) {
+    if (!codes.includes(iss.code)) continue;
+    out.push(iss.message);
+  }
+  return out;
+}
+
+function edgeLocalHasTwoStickerSameOrOpposite(facelets54: string): boolean {
+  for (let e = 0; e < EDGE_FACELETS.length; e++) {
+    const [a, b] = EDGE_FACELETS[e]!;
+    const ca = facelets54[a]!;
+    const cb = facelets54[b]!;
+    if (!isFaceId(ca) || !isFaceId(cb)) continue;
+    if (ca === cb || OPP[ca] === cb) return true;
+  }
+  return false;
+}
+
+/** 无两格同色/对色前提下：活跃槽与 `a,b,c`；若无活跃槽返回 null。 */
+function edgeLocalComputeAbc(facelets54: string): { a: number; b: number; c: number } | null {
+  const activeSlots: number[] = [];
+  for (let e = 0; e < 12; e++) {
+    if (edgeSlotHasAtLeastOneFaceColor(facelets54, e)) activeSlots.push(e);
+  }
+  const a = activeSlots.length;
+  if (a === 0) return null;
+  const adj: boolean[][] = activeSlots.map((e) =>
+    Array.from({ length: 12 }, (_, j) => edgeSlotCompatibleWithRefPiece(facelets54, e, j)),
+  );
+  const b = maxMatchingBipartite(adj, 12);
+  const c = b < a ? 0 : countSaturatingInjections(adj, 12);
+  return { a, b, c };
+}
+
 export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
   const { issues, validationStop, disabledChecks } = report;
   const skipFrom = firstSkippedGroupAfter(validationStop);
@@ -191,6 +231,7 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
         description: g.description,
         status: 'skipped' as const,
         cellIndices: [],
+        messages: [],
       };
     }
     if (
@@ -204,6 +245,7 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
         description: g.description,
         status: 'skipped' as const,
         cellIndices: [],
+        messages: [],
       };
     }
     if (skipping) {
@@ -213,16 +255,26 @@ export function buildConstraintRows(report: LegalityReport): ConstraintRow[] {
         description: g.description,
         status: 'skipped' as const,
         cellIndices: [],
+        messages: [],
       };
     }
     const cellIndices = mergeCodesForGroup(issues, g.codes);
     const failed = issues.some((iss) => g.codes.includes(iss.code));
+    const fromIssues = messagesForGroup(issues, g.codes);
+    const messages =
+      g.id === 'edge_local' && !failed && report.edgeLocalPassSummary
+        ? [
+            `棱块（局部）通过：活跃棱槽 a=${report.edgeLocalPassSummary.a}；每条活跃槽到互异 REF 下标的完整指派方案数 c=${report.edgeLocalPassSummary.c}。`,
+            ...fromIssues,
+          ]
+        : fromIssues;
     return {
       id: g.id,
       title: g.title,
       description: g.description,
       status: failed ? ('fail' as const) : ('pass' as const),
       cellIndices,
+      messages,
     };
   });
 }
@@ -407,7 +459,7 @@ export function satisfiesCornerTwistConstraint(
 }
 
 /**
- * 是否与「约束 C · 棱翻转」在 **完全填充** 情形下的偶数翻转判定一致（供 `EDGE_FLIP_FULL` 与枚举过滤共用）。
+ * 是否与「约束 C ·       」在 **完全填充** 情形下的偶数翻转判定一致（供 `EDGE_FLIP_FULL` 与枚举过滤共用）。
  * 若存在整棱两格均未填、或尚未两格均填、或尚不能从贴纸解出完整 `eo`，则不据此判失败，返回 `true`。
  * @returns 可严检且 `sum(eo)` 为奇时 `false`，否则 `true`（含不适用）。
  */
@@ -747,6 +799,7 @@ function legalityValidateLength(
       illegalCellIndices: mergeIndices(issues),
       validationStop: 'LEN',
       disabledChecks,
+      edgeLocalPassSummary: undefined,
     };
   }
   return null;
@@ -793,6 +846,7 @@ function legalityValidateCharsetAndCountColors(
       illegalCellIndices: mergeIndices(issues),
       validationStop: 'CHAR',
       disabledChecks,
+      edgeLocalPassSummary: undefined,
     };
   }
   return { counts };
@@ -900,7 +954,39 @@ function maxMatchingBipartite(adj: boolean[][], nR: number): number {
 }
 
 /**
- * 约束组 **棱块（局部）**：两格均填时先报同色/对色；再以「活跃棱槽数 a」与「到 REF 的最大匹配 b」检验 a=b。
+ * 左部 `a` 行、右部 `nR` 列；统计将每行指派到互不相同列且 `adj[li][j]` 为真的方案数 `c`（DP，右部至多 12）。
+ * `a=0` 时勿调用；`b<a` 时结果为 0。
+ */
+function countSaturatingInjections(adj: boolean[][], nR: number): number {
+  const nL = adj.length;
+  if (nL === 0) return 1;
+  const nMask = 1 << nR;
+  const memo = new Map<number, number>();
+
+  function key(li: number, mask: number): number {
+    return li * nMask + mask;
+  }
+
+  function dp(li: number, mask: number): number {
+    if (li === nL) return 1;
+    const k = key(li, mask);
+    const hit = memo.get(k);
+    if (hit !== undefined) return hit;
+    let sum = 0;
+    for (let j = 0; j < nR; j++) {
+      if (mask & (1 << j)) continue;
+      if (!adj[li]![j]) continue;
+      sum += dp(li + 1, mask | (1 << j));
+    }
+    memo.set(k, sum);
+    return sum;
+  }
+
+  return dp(0, 0);
+}
+
+/**
+ * 约束组 **棱块（局部）**：两格均填时先报同色/对色；再以「活跃棱槽数 a」与「到 REF 的最大匹配 b」检验 a=b；`c` 为饱和左部的指派方案数。
  */
 function legalityPushEdgeLocal(facelets54: string, push: LegalityPush): void {
   let twoStickerLocalBad = false;
@@ -927,28 +1013,21 @@ function legalityPushEdgeLocal(facelets54: string, push: LegalityPush): void {
   }
   if (twoStickerLocalBad) return;
 
-  const activeSlots: number[] = [];
-  for (let e = 0; e < 12; e++) {
-    if (edgeSlotHasAtLeastOneFaceColor(facelets54, e)) activeSlots.push(e);
-  }
-  const a = activeSlots.length;
-  if (a === 0) return;
-
-  const adj: boolean[][] = activeSlots.map((e) =>
-    Array.from({ length: 12 }, (_, j) => edgeSlotCompatibleWithRefPiece(facelets54, e, j)),
-  );
-  const b = maxMatchingBipartite(adj, 12);
+  const abc = edgeLocalComputeAbc(facelets54);
+  if (!abc) return;
+  const { a, b, c } = abc;
   if (a === b) return;
 
   const cells: number[] = [];
-  for (const e of activeSlots) {
+  for (let e = 0; e < 12; e++) {
+    if (!edgeSlotHasAtLeastOneFaceColor(facelets54, e)) continue;
     const [ia, ib] = EDGE_FACELETS[e]!;
     cells.push(ia, ib);
   }
   push(
     'piece',
     'EDGE_UNIQUE',
-    `棱块（局部）：至少一面已填的棱槽 ${a} 个，与 REF 中 12 棱可建立的一一分配至多 ${b} 个（须 a=b）。`,
+    `棱块（局部）：至少一面已填的棱槽 a=${a}；与 REF 的最大一一分配数 b=${b}（须 a=b）；每条活跃槽到互异 REF 下标的完整指派方案数 c=${c}（b<a 时为 0）。`,
     cells,
   );
 }
@@ -1250,6 +1329,16 @@ export function validateLegality(
   legalityPushIncomplete(facelets54, push);
   legalityPushCenterMultiset(facelets54, counts, checkCenterMultiset, push);
   legalityPushEdgeLocal(facelets54, push);
+  const edgeLocalIssueCodes = new Set(['EDGE_SAME', 'EDGE_OPP', 'EDGE_UNIQUE']);
+  const edgeLocalFailed = issues.some((i) => edgeLocalIssueCodes.has(i.code));
+  let edgeLocalPassSummary: { a: number; c: number } | undefined = undefined;
+  if (!edgeLocalFailed && !edgeLocalHasTwoStickerSameOrOpposite(facelets54)) {
+    const abc = edgeLocalComputeAbc(facelets54);
+    if (abc !== null && abc.a === abc.b) {
+      edgeLocalPassSummary = { a: abc.a, c: abc.c };
+    }
+  }
+
   legalityPushCornerLocal(facelets54, push);
 
   const state = buildCube(facelets54);
@@ -1269,6 +1358,7 @@ export function validateLegality(
     illegalCellIndices: mergeIndices(issues),
     validationStop: null,
     disabledChecks,
+    edgeLocalPassSummary,
   };
 }
 

@@ -644,6 +644,16 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
                 }}</span>
                 <span class="constraint__title">{{ row.title }}</span>
                 <span class="constraint__desc">{{ row.description }}</span>
+                <ul
+                  v-if="row.messages.length > 0"
+                  class="constraint__msgs"
+                  role="list"
+                  aria-label="本项校验说明"
+                >
+                  <li v-for="(msg, mi) in row.messages" :key="mi" class="constraint__msg">
+                    {{ msg }}
+                  </li>
+                </ul>
               </button>
             </div>
             <button
@@ -665,6 +675,16 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
               }}</span>
               <span class="constraint__title">{{ row.title }}</span>
               <span class="constraint__desc">{{ row.description }}</span>
+              <ul
+                v-if="row.messages.length > 0"
+                class="constraint__msgs"
+                role="list"
+                aria-label="本项校验说明"
+              >
+                <li v-for="(msg, mi) in row.messages" :key="mi" class="constraint__msg">
+                  {{ msg }}
+                </li>
+              </ul>
             </button>
           </li>
         </ul>
@@ -1174,6 +1194,19 @@ function onCandidateDialogBackdropClick(ev: MouseEvent) {
   font-size: 0.72rem;
   line-height: 1.45;
   color: #5c5c5c;
+}
+
+.constraint__msgs {
+  margin: 0.45rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #444;
+  list-style: disc;
+}
+
+.constraint__msg {
+  margin: 0.12rem 0;
 }
 
 .footnote {
