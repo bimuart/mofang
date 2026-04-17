@@ -6,7 +6,7 @@ export const STORAGE_LOCALE = 'mofang2-locale';
 /** 扁平 key，便于 `t('foo.bar')` */
 export const messages: Record<Locale, Record<string, string>> = {
   zh: {
-    'app.title': '魔方合法性校验',
+    'app.title': 'Cube',
     'app.aria.cube3d': '三阶魔方三维视图，拖拽旋转视角，点击贴纸换色',
     'app.aria.io': '面串输入与求解步骤',
     'app.aria.toolbar': '操作',
@@ -21,8 +21,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'toolbar.random': '随机',
     'toolbar.randomAll': '全部',
     'toolbar.randomRest': '未选',
-    'toolbar.randomRestDisabledTip':
-      '右侧五条约束中若有未通过，无法在违反约束的已填色上「随机其余」；请先选「全部」整态随机。',
+    'toolbar.randomRestDisabledTip': '当前校验未通过',
     'toolbar.randomMenu': '随机方式',
     'toolbar.clear': '清空',
     'toolbar.undo': '撤销',
@@ -95,7 +94,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'picker.mutedFace': '不在约束链候选集合内，仍可点击选择',
   },
   en: {
-    'app.title': 'Cube Legality Checker',
+    'app.title': 'Cube',
     'app.aria.cube3d': '3×3 cube view: drag to rotate, click stickers to paint',
     'app.aria.io': 'Facelet string input and solution strip',
     'app.aria.toolbar': 'Actions',
@@ -110,8 +109,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'toolbar.random': 'Random',
     'toolbar.randomAll': 'All',
     'toolbar.randomRest': 'Rest',
-    'toolbar.randomRestDisabledTip':
-      'If any of the five constraint rows on the right fails, “Rest” cannot fill around invalid stickers; choose “All” for a full random legal state.',
+    'toolbar.randomRestDisabledTip': 'Current validation failed',
     'toolbar.randomMenu': 'Random mode',
     'toolbar.clear': 'Clear',
     'toolbar.undo': 'Undo',

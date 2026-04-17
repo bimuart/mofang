@@ -1288,12 +1288,13 @@ function applySelectedParityIncompleteEnumeration() {
       <button
         type="button"
         class="app-chrome__icon"
+        :title="isDark ? t('chrome.themeToLight') : t('chrome.themeToDark')"
         @click="toggleColorScheme"
       >
         <span class="app-chrome__icon-inner" aria-hidden="true">
           <Transition name="chrome-ico" mode="out-in">
             <svg
-              v-if="isDark"
+              v-if="!isDark"
               key="sun"
               class="app-chrome__svg"
               viewBox="0 0 24 24"
@@ -1313,10 +1314,13 @@ function applySelectedParityIncompleteEnumeration() {
               width="20"
               height="20"
             >
-              <path
-                fill="currentColor"
-                d="M21 14.5A8.5 8.5 0 0 1 9.5 3c.74 0 1.45.1 2.13.28a7 7 0 1 0 9.09 9.09c.18.68.28 1.39.28 2.13Z"
-              />
+              <defs>
+                <mask id="app-chrome-moon-mask">
+                  <rect width="24" height="24" fill="white" />
+                  <circle cx="16" cy="9" r="7.15" fill="black" />
+                </mask>
+              </defs>
+              <circle cx="13" cy="11" r="7.15" fill="currentColor" mask="url(#app-chrome-moon-mask)" />
             </svg>
           </Transition>
         </span>
@@ -1467,32 +1471,12 @@ function applySelectedParityIncompleteEnumeration() {
                 >
                   <button
                     type="button"
-                    class="random-popover__btn random-popover__btn--rest"
+                    class="random-popover__btn"
                     role="menuitem"
                     :disabled="hasUserConstraintFailure"
                     @click="onRandomPopoverPickRest"
                   >
-                    <span class="random-popover__btn-text">{{ t('toolbar.randomRest') }}</span>
-                    <span v-if="hasUserConstraintFailure" class="random-popover__badge" aria-hidden="true">
-                      <svg
-                        class="random-popover__badge-svg"
-                        viewBox="0 0 16 16"
-                        width="18"
-                        height="18"
-                        focusable="false"
-                      >
-                        <circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" />
-                        <line
-                          x1="4.25"
-                          y1="11.75"
-                          x2="11.75"
-                          y2="4.25"
-                          stroke="currentColor"
-                          stroke-width="1.5"
-                          stroke-linecap="round"
-                        />
-                      </svg>
-                    </span>
+                    {{ t('toolbar.randomRest') }}
                   </button>
                 </span>
               </div>
@@ -1964,21 +1948,25 @@ function applySelectedParityIncompleteEnumeration() {
   padding: 0.38rem 0.72rem;
   border: none;
   background: transparent;
-  color: inherit;
+  color: var(--ui-muted);
   font-size: 0.75rem;
-  font-weight: 650;
+  font-weight: 500;
   letter-spacing: 0.04em;
   cursor: pointer;
-  transition: background 0.4s ease, color 0.4s ease;
+  opacity: 0.62;
+  transition: background 0.4s ease, color 0.4s ease, opacity 0.4s ease, font-weight 0.4s ease;
 }
 
 .app-chrome__lang-btn--on {
   background: var(--accent-soft);
   color: var(--accent-text);
+  font-weight: 650;
+  opacity: 1;
 }
 
 .app-chrome__lang-btn:not(.app-chrome__lang-btn--on):hover {
   background: var(--chrome-hover);
+  opacity: 0.88;
 }
 
 .chrome-ico-enter-active,
@@ -2201,6 +2189,7 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .random-popover__rest-wrap {
+  position: relative;
   flex: 1 1 0;
   min-height: 0;
   display: flex;
@@ -2212,34 +2201,13 @@ function applySelectedParityIncompleteEnumeration() {
   width: 100%;
 }
 
-.random-popover__btn--rest {
-  position: relative;
-}
-
-.random-popover__btn-text {
+/** 禁用时不接收指针，悬停落在父级 `span` 上以触发原生 `title` */
+.random-popover__rest-wrap:has(.random-popover__btn:disabled) .random-popover__btn:disabled {
   pointer-events: none;
-}
-
-.random-popover__badge {
-  position: absolute;
-  top: -0.2rem;
-  right: -0.08rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-  color: #dc2626;
-  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.85));
-  pointer-events: none;
-}
-
-.random-popover__badge-svg {
-  display: block;
 }
 
 .random-popover__btn:disabled {
   opacity: 0.45;
-  cursor: not-allowed;
   filter: grayscale(0.35);
 }
 
