@@ -58,6 +58,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'constraints.pass': '通过',
     'constraints.fail': '未通过',
     'constraints.skipped': '未校验',
+    'constraints.validationTreeAria': '3×3 魔方约束校验树',
+    'constraints.validationTreeDblclickHint': '双击查看约束校验树（与文档一致）',
 
     'constraints.edge_position.title': '棱块位置',
     'constraints.edge_position.intro': '12个棱块的排列位置。',
@@ -148,6 +150,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'constraints.pass': 'OK',
     'constraints.fail': 'Fail',
     'constraints.skipped': 'N/A',
+    'constraints.validationTreeAria': '3×3 cube constraint validation tree',
+    'constraints.validationTreeDblclickHint': 'Double-click to view the validation tree (same as docs)',
 
     'constraints.edge_position.title': 'Edge permutation',
     'constraints.edge_position.intro': 'Permutation of the 12 edge pieces.',

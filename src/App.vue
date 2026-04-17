@@ -36,6 +36,7 @@ import { FACES, type FaceId } from './cube/types';
 import RandomFillPrewarmWorker from './workers/randomFillPrewarm.worker.ts?worker';
 import { useAppChrome } from './i18n/useAppI18n';
 import type { Locale } from './i18n/messages';
+import { VALIDATION_TREE_DOC_EN, VALIDATION_TREE_DOC_ZH } from './constraints/validationTreeDoc';
 
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
@@ -613,27 +614,42 @@ const hasUserConstraintFailure = computed(() =>
 /** 仅当选中某一用户约束时在 3D 上高亮对应格；默认不高亮 */
 const selectedUserConstraintId = ref<UserConstraintId | null>(null);
 
-watch(
-  () => userConstraintRows.value.find((r) => r.id === 'parity')?.status,
-  (parityStatus) => {
-    if (parityStatus === 'skipped' && selectedUserConstraintId.value === 'parity') {
-      selectedUserConstraintId.value = null;
-    }
-  },
+const constraintTreeModalOpen = ref(false);
+
+const constraintValidationTreeBody = computed(() =>
+  locale.value === 'en' ? VALIDATION_TREE_DOC_EN : VALIDATION_TREE_DOC_ZH,
 );
+
+function openConstraintTreeModal() {
+  constraintTreeModalOpen.value = true;
+}
+
+function closeConstraintTreeModal() {
+  constraintTreeModalOpen.value = false;
+}
+
+watchEffect((onCleanup) => {
+  if (!constraintTreeModalOpen.value) return;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') closeConstraintTreeModal();
+  };
+  document.addEventListener('keydown', onKey);
+  onCleanup(() => document.removeEventListener('keydown', onKey));
+});
 
 const highlightIndices = computed(() => {
   const uid = selectedUserConstraintId.value;
   if (uid === null) return new Set<number>();
   const spec = USER_CONSTRAINT_SPEC.find((s) => s.id === uid);
   const urow = userConstraintRows.value.find((r) => r.id === uid);
-  if (!spec || !urow || urow.status === 'skipped') return new Set<number>();
+  if (!spec || !urow) return new Set<number>();
+  if (urow.status === 'skipped' && uid !== 'parity') return new Set<number>();
   return mergeCellIndicesForSources(constraintRows.value, spec.sourceIds);
 });
 
 function toggleUserConstraintHighlight(id: UserConstraintId) {
   const urow = userConstraintRows.value.find((r) => r.id === id);
-  if (!urow || urow.status === 'skipped') return;
+  if (!urow || (urow.status === 'skipped' && id !== 'parity')) return;
   if (selectedUserConstraintId.value === id) {
     selectedUserConstraintId.value = null;
     return;
@@ -644,7 +660,7 @@ function toggleUserConstraintHighlight(id: UserConstraintId) {
 /** 点击约束抽屉内除约束条按钮外的区域时取消选中 */
 function onConstraintsDrawerBackgroundClick(ev: MouseEvent) {
   const t = ev.target as HTMLElement | null;
-  if (t?.closest('button.constraint')) return;
+  if (t?.closest('button.constraint') || t?.closest('.status')) return;
   selectedUserConstraintId.value = null;
 }
 
@@ -1345,7 +1361,7 @@ function applySelectedParityIncompleteEnumeration() {
       </div>
     </div>
     <div class="page-ui-i18n" :class="{ 'page-ui-i18n--hide': localeHidden }">
-    <!-- 面串输入固定左上宽区，与下方窄按钮栏分离，减少左侧整条遮挡魔方命中区 -->
+    <!-- 面串输入固定左上宽区；输入框宽度单独限制，「应用」在下一行左对齐 -->
     <div class="app-io-layer">
         <div class="toolbar__io-block">
         <section class="facelets54 card facelets54--corner" aria-label="facelets54">
@@ -1562,7 +1578,12 @@ function applySelectedParityIncompleteEnumeration() {
 
         <div class="panel panel--constraints" :aria-label="t('constraints.panel')">
           <div class="constraints-drawer" @click="onConstraintsDrawerBackgroundClick">
-            <div class="status" :class="report.ok ? 'status--ok' : 'status--bad'">
+            <div
+              class="status"
+              :class="report.ok ? 'status--ok' : 'status--bad'"
+              :title="t('constraints.validationTreeDblclickHint')"
+              @dblclick.stop="openConstraintTreeModal"
+            >
               {{ report.ok ? t('constraints.statusOk') : t('constraints.statusBad') }}
             </div>
             <ul class="constraints" role="list">
@@ -1576,7 +1597,7 @@ function applySelectedParityIncompleteEnumeration() {
                     'constraint--skip': row.status === 'skipped',
                     'constraint--active': selectedUserConstraintId === row.id,
                   }"
-                  :disabled="row.status === 'skipped'"
+                  :disabled="row.status === 'skipped' && row.id !== 'parity'"
                   :aria-pressed="selectedUserConstraintId === row.id"
                   @click.stop="toggleUserConstraintHighlight(row.id)"
                 >
@@ -1614,6 +1635,21 @@ function applySelectedParityIncompleteEnumeration() {
         </div>
       </div>
     </Transition>
+
+    <Teleport to="body">
+      <Transition name="constraint-tree-fade">
+        <div
+          v-if="constraintTreeModalOpen"
+          class="constraint-tree-doc-overlay"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('constraints.validationTreeAria')"
+          @click="closeConstraintTreeModal"
+        >
+          <pre class="constraint-tree-doc">{{ constraintValidationTreeBody }}</pre>
+        </div>
+      </Transition>
+    </Teleport>
 
     <template v-if="SHOW_DEV_CUBE_ENUM_JSON">
     <section class="edge-enum card" aria-label="棱块补全枚举">
@@ -2137,6 +2173,11 @@ function applySelectedParityIncompleteEnumeration() {
   white-space: nowrap;
 }
 
+/** 面串「应用」在窄 `input-row` 内须左对齐，避免被上行 `align-self: center` 居中 */
+.toolbar__io-block .facelets54__apply {
+  align-self: flex-start;
+}
+
 .toolbar__random-wrap {
   position: relative;
   /** 与 .toolbar button 同字号，否则 9em 相对继承的 1rem 算，会比子按钮（0.875rem）上 9em 更宽 */
@@ -2653,6 +2694,67 @@ function applySelectedParityIncompleteEnumeration() {
   color: #a8281e;
 }
 
+.constraint-tree-doc-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: clamp(1rem, 3vw, 2rem) clamp(1rem, 3vw, 2rem) clamp(1rem, 3vw, 2rem)
+    clamp(0.75rem, 2vw, 1.25rem);
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.constraint-tree-doc {
+  margin: 0;
+  max-width: min(52rem, calc(100vw - 2 * clamp(0.75rem, 2vw, 1.25rem)));
+  max-height: min(78vh, 100%);
+  overflow: auto;
+  padding: 1rem 1.15rem;
+  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--constraint-tree-panel-bg);
+  color: var(--ui-text);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  white-space: pre;
+  text-align: left;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  backdrop-filter: var(--glass-blur);
+}
+
+.constraint-tree-fade-enter-active,
+.constraint-tree-fade-leave-active {
+  transition: opacity 0.34s ease;
+}
+
+.constraint-tree-fade-enter-active .constraint-tree-doc,
+.constraint-tree-fade-leave-active .constraint-tree-doc {
+  transition:
+    opacity 0.34s ease,
+    transform 0.34s ease;
+}
+
+.constraint-tree-fade-enter-from,
+.constraint-tree-fade-leave-to {
+  opacity: 0;
+}
+
+.constraint-tree-fade-enter-from .constraint-tree-doc,
+.constraint-tree-fade-leave-to .constraint-tree-doc {
+  opacity: 0;
+  transform: translateX(14px);
+}
+
+.constraint-tree-fade-enter-to .constraint-tree-doc,
+.constraint-tree-fade-leave-from .constraint-tree-doc {
+  opacity: 1;
+  transform: translateX(0);
+}
+
 .constraints {
   list-style: none;
   padding: 0;
@@ -2876,27 +2978,33 @@ function applySelectedParityIncompleteEnumeration() {
 
 .facelets54__input-row {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.65rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
 }
 
 .facelets54__input-wrap {
   position: relative;
-  flex: 1 1 70ch;
-  min-width: min(100%, 70ch);
-  max-width: 70ch;
+  align-self: flex-start;
+  width: min(100%, 45ch);
+  max-width: 60ch;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .facelets54__textarea {
   box-sizing: border-box;
   display: block;
   width: 100%;
-  max-width: 70ch;
+  max-width: 100%;
   height: 2.05rem;
   min-height: 2.05rem;
   margin: 0;
-  padding: 0.32rem 3.6rem 0.28rem 0.15rem;
+  /** 单行在固定高度内靠下，与右下角计数区留出底边距 */
+  padding-top: calc(2.05rem - 0.78rem * 1.35 - 0.18rem - 1px);
+  padding-right: 3.6rem;
+  padding-bottom: 0.18rem;
+  padding-left: 0.15rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.78rem;
   line-height: 1.35;
@@ -2932,6 +3040,7 @@ function applySelectedParityIncompleteEnumeration() {
 
 .facelets54__apply {
   flex-shrink: 0;
+  align-self: flex-start;
 }
 
 .facelets54__err {
@@ -3053,6 +3162,8 @@ html[data-theme='light'] {
   --chip-inset: rgba(255, 255, 255, 0.25);
   --constraint-desc: #5c5c5c;
   --semi-opacity-track: rgba(0, 0, 0, 0.11);
+  /** 约束树浮窗：比通用 glass 更不透明，便于阅读 */
+  --constraint-tree-panel-bg: rgba(255, 255, 255, 0.89);
 }
 
 html[data-theme='dark'] {
@@ -3074,6 +3185,7 @@ html[data-theme='dark'] {
   --chip-inset: rgba(255, 255, 255, 0.08);
   --constraint-desc: #94a3b8;
   --semi-opacity-track: rgba(255, 255, 255, 0.14);
+  --constraint-tree-panel-bg: rgba(24, 28, 38, 0.57);
 }
 
 html[data-theme='dark'] .page-cube-layer::before {
