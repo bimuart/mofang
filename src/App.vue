@@ -605,6 +605,11 @@ const userConstraintRows = computed((): UserConstraintRow[] => {
   return base;
 });
 
+/** 与右侧五条用户约束一致：任一条为「未通过」 */
+const hasUserConstraintFailure = computed(() =>
+  userConstraintRows.value.some((r) => r.status === 'fail'),
+);
+
 /** 仅当选中某一用户约束时在 3D 上高亮对应格；默认不高亮 */
 const selectedUserConstraintId = ref<UserConstraintId | null>(null);
 
@@ -762,6 +767,7 @@ function onRandomPopoverPickAll() {
 }
 
 function onRandomPopoverPickRest() {
+  if (hasUserConstraintFailure.value) return;
   randomPopoverOpen.value = false;
   applyRandomFillRemainingByConstraintChain();
 }
@@ -1455,14 +1461,40 @@ function applySelectedParityIncompleteEnumeration() {
                 >
                   {{ t('toolbar.randomAll') }}
                 </button>
-                <button
-                  type="button"
-                  class="random-popover__btn"
-                  role="menuitem"
-                  @click="onRandomPopoverPickRest"
+                <span
+                  class="random-popover__rest-wrap"
+                  :title="hasUserConstraintFailure ? t('toolbar.randomRestDisabledTip') : undefined"
                 >
-                  {{ t('toolbar.randomRest') }}
-                </button>
+                  <button
+                    type="button"
+                    class="random-popover__btn random-popover__btn--rest"
+                    role="menuitem"
+                    :disabled="hasUserConstraintFailure"
+                    @click="onRandomPopoverPickRest"
+                  >
+                    <span class="random-popover__btn-text">{{ t('toolbar.randomRest') }}</span>
+                    <span v-if="hasUserConstraintFailure" class="random-popover__badge" aria-hidden="true">
+                      <svg
+                        class="random-popover__badge-svg"
+                        viewBox="0 0 16 16"
+                        width="18"
+                        height="18"
+                        focusable="false"
+                      >
+                        <circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" />
+                        <line
+                          x1="4.25"
+                          y1="11.75"
+                          x2="11.75"
+                          y2="4.25"
+                          stroke="currentColor"
+                          stroke-width="1.5"
+                          stroke-linecap="round"
+                        />
+                      </svg>
+                    </span>
+                  </button>
+                </span>
               </div>
             </Transition>
           </Teleport>
@@ -1755,7 +1787,61 @@ function applySelectedParityIncompleteEnumeration() {
   z-index: 0;
   pointer-events: auto;
   background: transparent;
-  transition: background 0.55s ease;
+  overflow: hidden;
+}
+
+.page-cube-layer::before,
+.page-cube-layer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+
+.page-cube-layer::before {
+  opacity: 1;
+  background-color: #f4e8dc;
+  background-image:
+    radial-gradient(ellipse 100% 68% at 50% 16%, rgba(255, 248, 235, 0.72) 0%, transparent 54%),
+    radial-gradient(ellipse 70% 45% at 80% 20%, rgba(255, 220, 190, 0.35) 0%, transparent 50%),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 3px,
+      rgba(120, 80, 40, 0.028) 3px,
+      rgba(120, 80, 40, 0.028) 6px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 3px,
+      rgba(120, 80, 40, 0.028) 3px,
+      rgba(120, 80, 40, 0.028) 6px
+    ),
+    linear-gradient(168deg, #fff9f2 0%, #f5e6d6 38%, #e9d8c8 72%, #dec9b8 100%);
+  background-attachment: fixed;
+}
+
+.page-cube-layer::after {
+  opacity: 0;
+  background-color: #0a0c10;
+  background-image:
+    radial-gradient(ellipse 90% 55% at 50% 12%, rgba(96, 165, 250, 0.22) 0%, transparent 55%),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 4px,
+      rgba(255, 255, 255, 0.016) 4px,
+      rgba(255, 255, 255, 0.016) 8px
+    ),
+    linear-gradient(168deg, #0c0e14 0%, #141a2d 42%, #0a0d12 100%);
+  background-attachment: fixed;
+}
+
+.page-cube-layer > * {
+  position: relative;
+  z-index: 1;
 }
 
 .view-3d--fullscreen {
@@ -2114,11 +2200,50 @@ function applySelectedParityIncompleteEnumeration() {
   writing-mode: horizontal-tb;
 }
 
-.random-popover__btn + .random-popover__btn {
+.random-popover__rest-wrap {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-top: 1px solid rgba(0, 0, 0, 0.07);
 }
 
-.random-popover__btn:hover {
+.random-popover__rest-wrap .random-popover__btn {
+  width: 100%;
+}
+
+.random-popover__btn--rest {
+  position: relative;
+}
+
+.random-popover__btn-text {
+  pointer-events: none;
+}
+
+.random-popover__badge {
+  position: absolute;
+  top: -0.2rem;
+  right: -0.08rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  color: #dc2626;
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.85));
+  pointer-events: none;
+}
+
+.random-popover__badge-svg {
+  display: block;
+}
+
+.random-popover__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.35);
+}
+
+.random-popover__btn:hover:not(:disabled) {
   background: rgba(0, 0, 0, 0.05);
 }
 
@@ -2983,41 +3108,11 @@ html[data-theme='dark'] {
   --semi-opacity-track: rgba(255, 255, 255, 0.14);
 }
 
-html[data-theme='light'] .page-cube-layer {
-  background-color: #f4e8dc;
-  background-image:
-    radial-gradient(ellipse 100% 68% at 50% 16%, rgba(255, 248, 235, 0.72) 0%, transparent 54%),
-    radial-gradient(ellipse 70% 45% at 80% 20%, rgba(255, 220, 190, 0.35) 0%, transparent 50%),
-    repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 3px,
-      rgba(120, 80, 40, 0.028) 3px,
-      rgba(120, 80, 40, 0.028) 6px
-    ),
-    repeating-linear-gradient(
-      90deg,
-      transparent,
-      transparent 3px,
-      rgba(120, 80, 40, 0.028) 3px,
-      rgba(120, 80, 40, 0.028) 6px
-    ),
-    linear-gradient(168deg, #fff9f2 0%, #f5e6d6 38%, #e9d8c8 72%, #dec9b8 100%);
-  background-attachment: fixed;
+html[data-theme='dark'] .page-cube-layer::before {
+  opacity: 0;
 }
 
-html[data-theme='dark'] .page-cube-layer {
-  background-color: #0a0c10;
-  background-image:
-    radial-gradient(ellipse 90% 55% at 50% 12%, rgba(96, 165, 250, 0.22) 0%, transparent 55%),
-    repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 4px,
-      rgba(255, 255, 255, 0.016) 4px,
-      rgba(255, 255, 255, 0.016) 8px
-    ),
-    linear-gradient(168deg, #0c0e14 0%, #141a2d 42%, #0a0d12 100%);
-  background-attachment: fixed;
+html[data-theme='dark'] .page-cube-layer::after {
+  opacity: 1;
 }
 </style>

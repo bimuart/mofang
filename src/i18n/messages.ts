@@ -21,6 +21,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'toolbar.random': '随机',
     'toolbar.randomAll': '全部',
     'toolbar.randomRest': '未选',
+    'toolbar.randomRestDisabledTip':
+      '右侧五条约束中若有未通过，无法在违反约束的已填色上「随机其余」；请先选「全部」整态随机。',
     'toolbar.randomMenu': '随机方式',
     'toolbar.clear': '清空',
     'toolbar.undo': '撤销',
@@ -33,7 +35,7 @@ export const messages: Record<Locale, Record<string, string>> = {
       '54 面均已填色：点击直接替换为 cubejs 随机合法态',
     'toolbar.tip.randomCentersOnly': '六面仅中心有面色：点击直接整态随机',
     'toolbar.tip.randomPartial':
-      '未填满：点击展开后可选「全部」整态随机或「未选」保留已填色补全',
+      '非清空且未填满：展开后可选「全部」或「未选」；五条约束有未通过时「未选」不可用',
     'toolbar.tip.undo': '撤销上一步改色、载入或演示步',
     'toolbar.tip.fillUnique':
       '按 U R F D L B 面顺序，在第一个存在「未填格且约束链候选仅 1 色」的面上，将该面所有此类格填入该色',
@@ -108,6 +110,8 @@ export const messages: Record<Locale, Record<string, string>> = {
     'toolbar.random': 'Random',
     'toolbar.randomAll': 'All',
     'toolbar.randomRest': 'Rest',
+    'toolbar.randomRestDisabledTip':
+      'If any of the five constraint rows on the right fails, “Rest” cannot fill around invalid stickers; choose “All” for a full random legal state.',
     'toolbar.randomMenu': 'Random mode',
     'toolbar.clear': 'Clear',
     'toolbar.undo': 'Undo',
@@ -120,7 +124,7 @@ export const messages: Record<Locale, Record<string, string>> = {
       'All 54 stickers filled: replace with a random legal cubejs state',
     'toolbar.tip.randomCentersOnly': 'Only centers colored: randomize full state',
     'toolbar.tip.randomPartial':
-      'Incomplete: open menu for “All” or “Rest” to keep filled cells',
+      'Not cleared and not full: menu has “All” or “Rest”; “Rest” is unavailable when any of the five constraints fails',
 
     'toolbar.tip.undo': 'Undo last color change, load, or demo step',
     'toolbar.tip.fillUnique':

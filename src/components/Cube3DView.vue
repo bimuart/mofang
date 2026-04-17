@@ -335,12 +335,12 @@ function permuteAfterMove(pieceAtNewSlot: number[]) {
 
 function clearHint() {
   if (!hintRoot) return;
-  let sharedMat: THREE.MeshBasicMaterial | null = null;
+  let sharedMat: THREE.Material | null = null;
   while (hintRoot.children.length) {
     const o = hintRoot.children[0]!;
     hintRoot.remove(o);
     if (o instanceof THREE.Mesh) {
-      if (!sharedMat) sharedMat = o.material as THREE.MeshBasicMaterial;
+      if (!sharedMat) sharedMat = o.material as THREE.Material;
       o.geometry.dispose();
     }
   }
@@ -396,8 +396,10 @@ function hintArcBasis(face: FaceId, omega: THREE.Vector3): {
 
 const HINT_ARC_RADIUS = 0.72;
 const HINT_TUBE_RADIUS = 0.058;
-/** 提示弧与箭头（深蓝） */
-const HINT_DEEP_BLUE = 0x0d47a1;
+/** 提示弧与箭头（糖果蓝） */
+const HINT_CANDY_BLUE = 0x57d0ff;
+/** 轻微抬离魔方表面，避免视觉上像“贴纸层” */
+const HINT_SURFACE_LIFT = 0.06;
 const CONE_HEIGHT = 0.32;
 const CONE_RADIUS = 0.15;
 
@@ -408,11 +410,13 @@ function buildHintArrows(face: FaceId, power: 0 | 1 | 2) {
   const omega = axisForFaceTurn(face);
   const deltaPhi = angleForFaceTurn(face, power);
   const { center, u0, v0 } = hintArcBasis(face, omega);
+  const faceNormal = center.clone().normalize();
+  const liftedCenter = center.clone().addScaledVector(faceNormal, HINT_SURFACE_LIFT);
   const phi0 = Math.PI * 0.35;
   const segments = power === 1 ? 64 : 40;
 
   const arcCurve = new RotationHintArcCurve(
-    center,
+    liftedCenter,
     HINT_ARC_RADIUS,
     u0,
     v0,
@@ -422,10 +426,14 @@ function buildHintArrows(face: FaceId, power: 0 | 1 | 2) {
 
   const tubeGeom = new THREE.TubeGeometry(arcCurve, segments, HINT_TUBE_RADIUS, 12, false);
 
-  /** 与普通网格一致：参与深度缓冲，随视角被魔方体面正常遮挡 */
-  const hintMat = new THREE.MeshBasicMaterial({
-    color: HINT_DEEP_BLUE,
+  /** 改用受光照材质，让弧形箭头有明暗层次和高光，立体感更强 */
+  const hintMat = new THREE.MeshStandardMaterial({
+    color: HINT_CANDY_BLUE,
     side: THREE.DoubleSide,
+    metalness: 0.08,
+    roughness: 0.26,
+    emissive: 0x1f7dff,
+    emissiveIntensity: 0.14,
   });
 
   const tubeMesh = new THREE.Mesh(tubeGeom, hintMat);
