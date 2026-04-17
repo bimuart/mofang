@@ -3,6 +3,8 @@ import {
   computed,
   nextTick,
   onBeforeUnmount,
+  onMounted,
+  provide,
   ref,
   watch,
   watchEffect,
@@ -29,15 +31,31 @@ import {
   type EdgeFillEnumerationEntry,
   type ParityIncompleteFillEnumerationEntry,
 } from './cube/cubeConstraints';
-import { invertAlgorithmMoves, splitAlgorithm } from './cube/layerTurn';
+import { invertAlgorithmMoves, invertMoveToken, splitAlgorithm } from './cube/layerTurn';
 import { FACES, type FaceId } from './cube/types';
 import RandomFillPrewarmWorker from './workers/randomFillPrewarm.worker.ts?worker';
+import { useAppChrome } from './i18n/useAppI18n';
+import type { Locale } from './i18n/messages';
 
 /** 六个中心格不可改色（与轴固定） */
 const LOCKED_CENTER = new Set<number>(CENTER_INDICES);
 
 /** 为 true 时显示下方「枚举 / buildCube JSON」开发面板；逻辑与函数仍保留，默认不向普通用户展示 */
 const SHOW_DEV_CUBE_ENUM_JSON = false;
+
+const { isDark, locale, t, toggleColorScheme, setLocale: setLocaleBase } = useAppChrome();
+provide('i18nT', t);
+
+/** 切换语言：先淡出再更新文案再淡入 */
+const localeHidden = ref(false);
+async function setLocale(next: Locale) {
+  if (next === locale.value) return;
+  localeHidden.value = true;
+  await new Promise((r) => setTimeout(r, 320));
+  setLocaleBase(next);
+  await nextTick();
+  localeHidden.value = false;
+}
 
 const MAX_UNDO = 80;
 /** 每次改色 / 载入 / 演示步 之前压入的 54 位串；撤销弹出上一帧（含撤销自动填充） */
@@ -60,14 +78,18 @@ function applyFacelets54FromInput() {
   facelets54ApplyError.value = null;
   const compact = compactFacelets54Input(facelets54Draft.value);
   if (compact.length !== 54) {
-    facelets54ApplyError.value = `须恰好 54 个字符（忽略空白后当前 ${compact.length} 个）。`;
+    facelets54ApplyError.value = t('facelets.err.len', { n: compact.length });
     return;
   }
   let out = '';
   for (let i = 0; i < 54; i++) {
     const ch = compact[i]!;
     if (!isFaceletChar(ch)) {
-      facelets54ApplyError.value = `第 ${i + 1} 位非法字符 ${JSON.stringify(ch)}（仅允许 U、D、L、R、F、B 或未填 ${EMPTY_FACELET}）。`;
+      facelets54ApplyError.value = t('facelets.err.char', {
+        i: i + 1,
+        ch: JSON.stringify(ch),
+        empty: EMPTY_FACELET,
+      });
       return;
     }
     out += isEmptyCell(ch) ? EMPTY_FACELET : ch;
@@ -89,12 +111,110 @@ function pushUndoSnapshot() {
   if (st.length > MAX_UNDO) st.shift();
 }
 
-function undoFacelets() {
+/** 已向「下一步」推进过至少一次时，撤销回退演示步并保留步骤条 */
+const shouldSyncSolutionOnUndo = computed(() => {
+  if (solutionMoves.value.length === 0) return false;
+  if (solutionIsReverse.value) return !reverseAwaitingFirstNext.value;
+  return solutionStepIndex.value > 0;
+});
+
+function syncSolutionAfterUndo(prevFacelets: string) {
+  if (solutionMoves.value.length === 0) return;
+  if (solutionIsReverse.value) {
+    const target = reverseDemoTargetFacelets.value;
+    if (target && prevFacelets === target) {
+      reverseAwaitingFirstNext.value = true;
+      solutionStepIndex.value = 0;
+      return;
+    }
+    if (prevFacelets === solvedString()) {
+      reverseAwaitingFirstNext.value = false;
+      solutionStepIndex.value = 0;
+      return;
+    }
+    let c = Cube.fromString(solvedString());
+    for (let i = 0; i < solutionMoves.value.length; i++) {
+      c.move(solutionMoves.value[i]!);
+      if (c.asString() === prevFacelets) {
+        solutionStepIndex.value = i + 1;
+        reverseAwaitingFirstNext.value = false;
+        return;
+      }
+    }
+    return;
+  }
+  const start = solutionPlaybackStartFacelets.value;
+  if (!start) return;
+  if (prevFacelets === start) {
+    solutionStepIndex.value = 0;
+    return;
+  }
+  let c = Cube.fromString(start);
+  for (let i = 0; i < solutionMoves.value.length; i++) {
+    c.move(solutionMoves.value[i]!);
+    if (c.asString() === prevFacelets) {
+      solutionStepIndex.value = i + 1;
+      return;
+    }
+  }
+}
+
+async function undoFacelets() {
   if (undoStack.value.length === 0) return;
+  if (solutionAnimating.value) return;
+  const syncSol = shouldSyncSolutionOnUndo.value;
+  const view = cube3dRef.value;
+  const prevPeek = undoStack.value[undoStack.value.length - 1]!;
+  const target = reverseDemoTargetFacelets.value;
+  const revSolvedToX =
+    syncSol &&
+    solutionIsReverse.value &&
+    solutionStepIndex.value === 0 &&
+    !reverseAwaitingFirstNext.value &&
+    target !== null &&
+    prevPeek === target;
+
+  if (syncSol && view && (revSolvedToX || solutionStepIndex.value > 0)) {
+    const prev = undoStack.value.pop()!;
+    solutionAnimating.value = true;
+    try {
+      if (revSolvedToX) {
+        let c = Cube.fromString(solvedString());
+        for (const m of solutionMoves.value) {
+          await view.animateMove(m);
+          c.move(m);
+          skipInvalidationForSolutionStep.value = true;
+          facelets.value = c.asString();
+        }
+        syncSolutionAfterUndo(prev);
+      } else {
+        const lastMove = solutionMoves.value[solutionStepIndex.value - 1]!;
+        await view.animateMove(invertMoveToken(lastMove));
+        isUndoing.value = true;
+        try {
+          skipInvalidationForSolutionStep.value = true;
+          facelets.value = prev;
+          syncSolutionAfterUndo(prev);
+        } finally {
+          isUndoing.value = false;
+        }
+      }
+    } finally {
+      solutionAnimating.value = false;
+    }
+    return;
+  }
+
   isUndoing.value = true;
   try {
     const prev = undoStack.value.pop()!;
+    const syncSol2 = shouldSyncSolutionOnUndo.value;
+    if (syncSol2) skipInvalidationForSolutionStep.value = true;
     facelets.value = prev;
+    if (syncSol2) {
+      syncSolutionAfterUndo(prev);
+      void nextTick(() => cube3dRef.value?.resetLayout());
+    }
   } finally {
     isUndoing.value = false;
   }
@@ -398,38 +518,38 @@ type CheckStatus = 'pass' | 'fail' | 'skipped';
 /** 用户向 5 条：文案固定；状态由底层校验行聚合；高亮合并对应组的 cellIndices */
 const USER_CONSTRAINT_SPEC: readonly {
   id: UserConstraintId;
-  title: string;
-  intro: string;
+  titleKey: string;
+  introKey: string;
   sourceIds: readonly ConstraintGroupId[];
 }[] = [
   {
     id: 'edge_position',
-    title: '棱块位置',
-    intro: '12个棱块的排列位置。',
+    titleKey: 'constraints.edge_position.title',
+    introKey: 'constraints.edge_position.intro',
     sourceIds: ['edge_local', 'perm_a'],
   },
   {
     id: 'corner_position',
-    title: '角块位置',
-    intro: '8个角块的排列位置。',
+    titleKey: 'constraints.corner_position.title',
+    introKey: 'constraints.corner_position.intro',
     sourceIds: ['corner_local', 'perm_a'],
   },
   {
     id: 'edge_flip',
-    title: '棱块翻转',
-    intro: '棱块翻转的次数是偶数。',
+    titleKey: 'constraints.edge_flip.title',
+    introKey: 'constraints.edge_flip.intro',
     sourceIds: ['flip_c'],
   },
   {
     id: 'corner_twist',
-    title: '角块扭转',
-    intro: '角块扭转的次数是3的倍数。',
+    titleKey: 'constraints.corner_twist.title',
+    introKey: 'constraints.corner_twist.intro',
     sourceIds: ['twist_b'],
   },
   {
     id: 'parity',
-    title: '棱角奇偶',
-    intro: '棱块位置交换次数=角块位置交换次数，即同为奇数或偶数。',
+    titleKey: 'constraints.parity.title',
+    introKey: 'constraints.parity.intro',
     sourceIds: ['parity_incomplete', 'parity_d'],
   },
 ];
@@ -471,8 +591,8 @@ const userConstraintRows = computed((): UserConstraintRow[] => {
   const rows = constraintRows.value;
   const base = USER_CONSTRAINT_SPEC.map((spec) => ({
     id: spec.id,
-    title: spec.title,
-    intro: spec.intro,
+    title: t(spec.titleKey),
+    intro: t(spec.introKey),
     status: aggregateStatus(rows, spec.sourceIds),
   }));
   const edgeFlip = base.find((r) => r.id === 'edge_flip');
@@ -485,14 +605,8 @@ const userConstraintRows = computed((): UserConstraintRow[] => {
   return base;
 });
 
-const constraintsPanelOpen = ref(false);
-
 /** 仅当选中某一用户约束时在 3D 上高亮对应格；默认不高亮 */
 const selectedUserConstraintId = ref<UserConstraintId | null>(null);
-
-watch(constraintsPanelOpen, (open) => {
-  if (!open) selectedUserConstraintId.value = null;
-});
 
 watch(
   () => userConstraintRows.value.find((r) => r.id === 'parity')?.status,
@@ -656,36 +770,70 @@ watchEffect((onCleanup) => {
   if (!randomPopoverOpen.value) return;
   const onDoc = (e: PointerEvent) => {
     const el = e.target as HTMLElement | null;
-    if (el?.closest('.toolbar__random-wrap')) return;
+    if (el?.closest('.toolbar__random-wrap') || el?.closest('.random-popover')) return;
     randomPopoverOpen.value = false;
   };
   document.addEventListener('pointerdown', onDoc, true);
   onCleanup(() => document.removeEventListener('pointerdown', onDoc, true));
 });
 
-/** 「随机」主按钮尺寸：浮层宽与按钮同宽（原 w-2 再加宽 2px）；次行「未选」等高叠在下方；left/top 4px/4px */
+/** 「随机」浮层：Teleport + fixed，避免侧栏 overflow 裁切；宽与按钮同；「全部 / 未选」叠在按钮右侧 */
 const randomBtnRef = ref<HTMLButtonElement | null>(null);
 const randomBtnPx = ref({ w: 0, h: 0 });
+const randomBtnRect = ref({ left: 0, top: 0, right: 0, width: 0, height: 0 });
 
 function measureRandomBtnSize() {
   const el = randomBtnRef.value;
   if (!el) return;
   const r = el.getBoundingClientRect();
   randomBtnPx.value = { w: r.width, h: r.height };
+  randomBtnRect.value = {
+    left: r.left,
+    top: r.top,
+    right: r.right,
+    width: r.width,
+    height: r.height,
+  };
 }
+
+watchEffect((onCleanup) => {
+  if (!randomPopoverOpen.value) return;
+  const sync = () => measureRandomBtnSize();
+  sync();
+  window.addEventListener('scroll', sync, true);
+  window.addEventListener('resize', sync);
+  onCleanup(() => {
+    window.removeEventListener('scroll', sync, true);
+    window.removeEventListener('resize', sync);
+  });
+});
+
+watch(randomPopoverOpen, (open) => {
+  if (open) void nextTick(() => measureRandomBtnSize());
+});
 
 const randomPopoverBoxStyle = computed(() => {
   const { w, h } = randomBtnPx.value;
+  const r = randomBtnRect.value;
+  const base = {
+    position: 'fixed' as const,
+    left: `${r.right + 4}px`,
+    top: `${r.top + 4}px`,
+    boxSizing: 'border-box' as const,
+    zIndex: 10000,
+  };
   if (w <= 0 || h <= 0) {
-    return { left: '4px', top: '4px', boxSizing: 'border-box' as const };
+    return {
+      ...base,
+      visibility: 'hidden' as const,
+      pointerEvents: 'none' as const,
+    };
   }
   const row = h - 2;
   return {
-    left: '4px',
-    top: '4px',
+    ...base,
     width: `${w}px`,
     height: `${row * 2}px`,
-    boxSizing: 'border-box' as const,
   };
 });
 
@@ -709,6 +857,33 @@ onBeforeUnmount(() => {
 
 const solverInitialized = ref(false);
 const solverLoading = ref(false);
+
+function ensureSolverInitialized() {
+  if (solverInitialized.value) return;
+  Cube.initSolver();
+  solverInitialized.value = true;
+}
+
+/** 首次点「步骤」前会卡：在首屏渲染后的空闲时段预加载 cubejs 求解表 */
+function prewarmSolverWhenIdle() {
+  const run = () => {
+    if (solverInitialized.value) return;
+    try {
+      ensureSolverInitialized();
+    } catch {
+      /* 首次求步时会再试 */
+    }
+  };
+  if (typeof requestIdleCallback !== 'undefined') {
+    requestIdleCallback(run, { timeout: 4000 });
+  } else {
+    setTimeout(run, 0);
+  }
+}
+
+onMounted(() => {
+  prewarmSolverWhenIdle();
+});
 const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
 const solutionMoves = ref<string[]>([]);
@@ -717,6 +892,8 @@ const solutionStepIndex = ref(0);
 const reverseAwaitingFirstNext = ref(false);
 const solutionIsReverse = ref(false);
 const reverseDemoTargetFacelets = ref<string | null>(null);
+/** 正系「步骤」演示：获取序列时的 54 位串，撤销时用于对齐步数 */
+const solutionPlaybackStartFacelets = ref<string | null>(null);
 const solutionAnimating = ref(false);
 /** 为 true 时下一次 `facelets` 变更来自「下一步」演示，不应清空解法或 reset 3D */
 const skipInvalidationForSolutionStep = ref(false);
@@ -740,6 +917,14 @@ const canAdvanceSolutionStep = computed(() => {
   return solutionStepIndex.value < solutionMoves.value.length;
 });
 
+/** 点击「步骤 / 逆向步骤」后有可展示内容时显示左上步骤条，否则不占位 */
+const solverStripVisible = computed(
+  () =>
+    solverError.value != null ||
+    solverBanner.value != null ||
+    solutionMoves.value.length > 0,
+);
+
 function clearSolutionState() {
   solutionMoves.value = [];
   solutionStepIndex.value = 0;
@@ -748,25 +933,23 @@ function clearSolutionState() {
   solutionIsReverse.value = false;
   reverseAwaitingFirstNext.value = false;
   reverseDemoTargetFacelets.value = null;
+  solutionPlaybackStartFacelets.value = null;
 }
 
 async function fetchSolution() {
   solverError.value = null;
   solverBanner.value = null;
   if (!faceletsComplete.value) {
-    solverError.value = '请先填满 54 格。';
+    solverError.value = t('solver.err.fill54');
     return;
   }
   if (!report.value.ok) {
-    solverError.value = '当前染色不满足可解条件，无法计算还原步骤。';
+    solverError.value = t('solver.err.notSolvableForward');
     return;
   }
   solverLoading.value = true;
   try {
-    if (!solverInitialized.value) {
-      Cube.initSolver();
-      solverInitialized.value = true;
-    }
+    ensureSolverInitialized();
     const c = Cube.fromString(facelets.value);
     if (c.isSolved()) {
       solutionMoves.value = [];
@@ -774,7 +957,7 @@ async function fetchSolution() {
       solutionIsReverse.value = false;
       reverseAwaitingFirstNext.value = false;
       reverseDemoTargetFacelets.value = null;
-      solverBanner.value = '当前已是标准还原态，无需转动步骤。';
+      solverBanner.value = t('solver.banner.alreadySolvedForward');
       return;
     }
     const alg = c.solve();
@@ -782,6 +965,7 @@ async function fetchSolution() {
     reverseAwaitingFirstNext.value = false;
     reverseDemoTargetFacelets.value = null;
     solutionMoves.value = splitAlgorithm(alg);
+    solutionPlaybackStartFacelets.value = facelets.value;
     solutionStepIndex.value = 0;
   } catch (e) {
     solverError.value = e instanceof Error ? e.message : String(e);
@@ -799,19 +983,16 @@ async function fetchReverseSolution() {
   solverError.value = null;
   solverBanner.value = null;
   if (!faceletsComplete.value) {
-    solverError.value = '请先填满 54 格。';
+    solverError.value = t('solver.err.fill54');
     return;
   }
   if (!report.value.ok) {
-    solverError.value = '当前染色不满足可解条件，无法计算步骤。';
+    solverError.value = t('solver.err.notSolvableReverse');
     return;
   }
   solverLoading.value = true;
   try {
-    if (!solverInitialized.value) {
-      Cube.initSolver();
-      solverInitialized.value = true;
-    }
+    ensureSolverInitialized();
     const snapshot = facelets.value;
     const c = Cube.fromString(snapshot);
     if (c.isSolved()) {
@@ -820,7 +1001,7 @@ async function fetchReverseSolution() {
       solutionIsReverse.value = false;
       reverseAwaitingFirstNext.value = false;
       reverseDemoTargetFacelets.value = null;
-      solverBanner.value = '当前已是标准还原态，从还原态到当前态无转动步骤。';
+      solverBanner.value = t('solver.banner.alreadySolvedReverse');
       return;
     }
     const alg = c.solve();
@@ -876,8 +1057,7 @@ async function nextSolutionStep() {
           solutionStepIndex.value === solutionMoves.value.length &&
           facelets.value !== target
         ) {
-          solverError.value =
-            '逆向演示结束态与目标不一致（内部错误）；请重新获取逆向步骤。';
+          solverError.value = t('solver.err.reverseMismatch');
         }
       }
     } catch (e) {
@@ -908,10 +1088,13 @@ async function nextSolutionStep() {
   }
 }
 
-/** 3D 贴纸与黑框不透明度（0.1–1），始终生效 */
-const stickerOpacity = ref(1);
+/** 0–100：0% 不透明，100% 最透明（映射到贴纸/黑框 alpha 1 → 0.1） */
+const transparencyPercent = ref(0);
 
-const opacityPercent = computed(() => Math.round(stickerOpacity.value * 100));
+const stickerOpacity = computed(() => {
+  const t = Math.min(100, Math.max(0, transparencyPercent.value));
+  return 1 - (t / 100) * 0.9;
+});
 
 /** 用户改色或载入新状态后：清空已算好的还原序列，并把 3D 贴纸位姿恢复为与索引一致 */
 function invalidateSolutionAndReset3D() {
@@ -1075,213 +1258,8 @@ function applySelectedParityIncompleteEnumeration() {
 
 <template>
   <div class="page">
-    <div class="toolbar">
-      <button type="button" @click="setSolved">还原</button>
-      <div class="toolbar__random-wrap">
-        <button
-          ref="randomBtnRef"
-          type="button"
-          class="toolbar__primary"
-          :disabled="!canUseRandomButton"
-          :title="
-            faceletsComplete
-              ? '54 面均已填色：点击直接替换为 cubejs 随机合法态'
-              : isOnlyCentersFacelets
-                ? '六面仅中心有面色：点击直接整态随机'
-                : '未填满：点击展开后可选「全部」整态随机或「未选」保留已填色补全'
-          "
-          @click="onRandomMainButtonClick"
-        >
-          随机
-        </button>
-        <Transition name="mac-float">
-          <div
-            v-if="randomPopoverOpen"
-            class="random-popover mac-float-surface"
-            :style="randomPopoverBoxStyle"
-            role="menu"
-            aria-label="随机方式"
-          >
-            <button
-              type="button"
-              class="random-popover__btn"
-              role="menuitem"
-              @click="onRandomPopoverPickAll"
-            >
-              全部
-            </button>
-            <button
-              type="button"
-              class="random-popover__btn"
-              role="menuitem"
-              @click="onRandomPopoverPickRest"
-            >
-              未选
-            </button>
-          </div>
-        </Transition>
-      </div>
-      <button type="button" class="muted" @click="clearExceptCenters">清空</button>
-      <button
-        type="button"
-        class="muted"
-        :disabled="!canUndo"
-        title="撤销上一步改色、载入或演示步"
-        @click="undoFacelets"
-      >
-        撤销
-      </button>
-      <button
-        type="button"
-        class="toolbar__primary"
-        :disabled="!canFillFaceUniqueConstraint"
-        title="按 U R F D L B 面顺序，在第一个存在「未填格且约束链候选仅 1 色」的面上，将该面所有此类格填入该色（`computeConstraintChainBCandidates` + `validateConstraintChainA`）"
-        @click="fillOneFaceUniqueConstraintCandidates"
-      >
-        填充唯一候选
-      </button>
-      <button
-        type="button"
-        class="toolbar__primary"
-        :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
-        @click="fetchSolution"
-      >
-        {{ solverLoading ? '正在初始化求解器…' : '步骤' }}
-      </button>
-      <button
-        type="button"
-        class="toolbar__primary"
-        :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
-        @click="fetchReverseSolution"
-      >
-        {{ solverLoading ? '正在初始化求解器…' : '逆向步骤' }}
-      </button>
-      <button
-        type="button"
-        class="toolbar__primary"
-        :disabled="!canAdvanceSolutionStep || solverLoading || solutionAnimating"
-        @click="nextSolutionStep"
-      >
-        下一步
-      </button>
-    </div>
-    <p v-if="solverError" class="solver-err">{{ solverError }}</p>
-    <p v-else-if="solverBanner" class="solver-banner">{{ solverBanner }}</p>
-    <div v-else-if="solutionMoves.length > 0" class="solver-info">
-      <p class="solver-info__lead">
-        <template v-if="solutionIsReverse">
-          逆向步骤（还原态 → 获取时的状态）：列表步已执行 {{ solutionStepIndex }} /
-          {{ solutionMoves.length }}；首次「下一步」仅恢复还原态，之后每步施转一字。
-          <template v-if="reverseAwaitingFirstNext">下一步将<strong>恢复还原态</strong>。</template>
-          <template v-else-if="nextHintMove">
-            当前步 <strong>{{ nextHintMove }}</strong>
-          </template>
-          <template v-else>（已完成）</template>
-        </template>
-        <template v-else>
-          还原步骤：已执行 {{ solutionStepIndex }} / {{ solutionMoves.length }}；点击「下一步」按序演示；当前步
-          <strong v-if="nextHintMove">{{ nextHintMove }}</strong>
-          <span v-else>（已完成）</span>
-        </template>
-      </p>
-      <ol
-        class="solver-steps"
-        :aria-label="solutionIsReverse ? '从还原态到目标态的转动序列' : '完整还原步骤序列'"
-      >
-        <li
-          v-for="(m, i) in solutionMoves"
-          :key="`${i}-${m}`"
-          class="solver-steps__item"
-          :class="{
-            'solver-steps__item--done':
-              solutionIsReverse
-                ? !reverseAwaitingFirstNext && i < solutionStepIndex
-                : i < solutionStepIndex,
-            'solver-steps__item--current':
-              solutionIsReverse
-                ? !reverseAwaitingFirstNext &&
-                  i === solutionStepIndex &&
-                  solutionStepIndex < solutionMoves.length
-                : i === solutionStepIndex,
-            'solver-steps__item--pending':
-              solutionIsReverse
-                ? reverseAwaitingFirstNext ||
-                  i > solutionStepIndex ||
-                  (i === solutionStepIndex && solutionStepIndex >= solutionMoves.length)
-                : i > solutionStepIndex,
-          }"
-        >
-          <span class="solver-steps__move">{{ m }}</span>
-        </li>
-      </ol>
-    </div>
-    <section class="facelets54 card" aria-label="编辑 54 位面串">
-      <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
-      <div class="facelets54__row">
-        <div class="facelets54__left">
-          <div class="facelets54__input-wrap">
-            <textarea
-              ref="facelets54InputRef"
-              v-model="facelets54Draft"
-              class="facelets54__textarea"
-              rows="1"
-              spellcheck="false"
-              wrap="off"
-              :aria-label="`facelets54 文本输入，${facelets54CompactLen}/54 字符`"
-            />
-            <span class="facelets54__counter">{{ facelets54CompactLen }}/54</span>
-          </div>
-          <div class="facelets54__actions">
-            <button type="button" class="toolbar__primary" @click="applyFacelets54FromInput">
-              应用
-            </button>
-          </div>
-        </div>
-        <div class="facelets54__theme-side">
-          <div class="face-theme" aria-label="六面显示色">
-            <div class="face-theme__row" role="group">
-              <label
-                v-for="f in FACES"
-                :key="f"
-                class="face-theme__swatch"
-                :title="`${f} 面显示色`"
-              >
-                <span class="face-theme__tile" :style="{ backgroundColor: faceDisplayColors[f] }" />
-                <span class="face-theme__lbl">{{ f }}</span>
-                <input
-                  class="face-theme__color"
-                  type="color"
-                  :value="faceDisplayColors[f]"
-                  @input="setFaceDisplayColor(f, ($event.target as HTMLInputElement).value)"
-                />
-              </label>
-            </div>
-            <button type="button" class="face-theme__reset" @click="resetFaceDisplayColors">
-              重置
-            </button>
-          </div>
-          <label class="semi-opacity">
-            <span class="semi-opacity__label">3D 透明度</span>
-            <input
-              v-model.number="stickerOpacity"
-              class="semi-opacity__range"
-              type="range"
-              min="0.1"
-              max="1"
-              step="0.02"
-              aria-valuemin="0.1"
-              aria-valuemax="1"
-              :aria-valuenow="stickerOpacity"
-              aria-label="三维魔方贴纸与黑框不透明度"
-            />
-            <span class="semi-opacity__value" aria-hidden="true">{{ opacityPercent }}%</span>
-          </label>
-        </div>
-      </div>
-    </section>
-
-    <div class="layout">
-      <section class="view-3d" aria-label="三维魔方">
+    <div class="page-cube-layer">
+      <section class="view-3d view-3d--fullscreen">
         <Cube3DView
           ref="cube3dRef"
           :facelets="facelets"
@@ -1292,76 +1270,334 @@ function applySelectedParityIncompleteEnumeration() {
           :next-hint-move="nextHintMove"
           :semi-transparent="true"
           :sticker-opacity="stickerOpacity"
+          :dark-scene="isDark"
+          :view-aria-label="t('app.aria.cube3d')"
           @sticker-click="onStickerClick"
           @sticker-pointer-miss="onStickerPointerMiss"
         />
-
-        <Transition name="mac-float">
-          <div
-            v-if="selectedCell !== null"
-            class="picker-anchor"
-            :style="pickerFloatingStyle"
-          >
-            <div class="picker picker--floating card mac-float-surface">
-              <ColorCandidateBar
-                :candidates="pickerBarCandidates"
-                :face-colors="faceDisplayColors"
-                :constraint-allowed-faces="constraintAllowedFacesForPicker"
-                :disable-empty-chip="pickerDisableEmptyChip"
-                @pick="applyPick"
-              />
-            </div>
-          </div>
-        </Transition>
       </section>
-
-      <aside
-        class="panel panel--constraints"
-        :class="{ 'panel--constraints--collapsed': !constraintsPanelOpen }"
-        aria-label="约束说明"
+    </div>
+    <div class="page-ui">
+    <div class="app-chrome" :aria-label="t('app.aria.chrome')">
+      <button
+        type="button"
+        class="app-chrome__icon"
+        @click="toggleColorScheme"
       >
+        <span class="app-chrome__icon-inner" aria-hidden="true">
+          <Transition name="chrome-ico" mode="out-in">
+            <svg
+              v-if="isDark"
+              key="sun"
+              class="app-chrome__svg"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+            >
+              <circle cx="12" cy="12" r="4.2" fill="currentColor" />
+              <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none">
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+              </g>
+            </svg>
+            <svg
+              v-else
+              key="moon"
+              class="app-chrome__svg"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+            >
+              <path
+                fill="currentColor"
+                d="M21 14.5A8.5 8.5 0 0 1 9.5 3c.74 0 1.45.1 2.13.28a7 7 0 1 0 9.09 9.09c.18.68.28 1.39.28 2.13Z"
+              />
+            </svg>
+          </Transition>
+        </span>
+      </button>
+      <div class="app-chrome__lang" role="group" :aria-label="t('chrome.lang')">
         <button
           type="button"
-          class="constraints-toggle"
-          :aria-expanded="constraintsPanelOpen"
-          @click="constraintsPanelOpen = !constraintsPanelOpen"
+          class="app-chrome__lang-btn"
+          :class="{ 'app-chrome__lang-btn--on': locale === 'zh' }"
+          @click="setLocale('zh')"
         >
-          约束
+          中
         </button>
-        <div
-          v-show="constraintsPanelOpen"
-          class="constraints-drawer"
-          @click="onConstraintsDrawerBackgroundClick"
+        <button
+          type="button"
+          class="app-chrome__lang-btn"
+          :class="{ 'app-chrome__lang-btn--on': locale === 'en' }"
+          @click="setLocale('en')"
         >
-          <div class="status" :class="report.ok ? 'status--ok' : 'status--bad'">
-            {{ report.ok ? '当前状态：合法（可解必要条件均满足）' : '当前状态：存在非法项或未填色' }}
+          EN
+        </button>
+      </div>
+    </div>
+    <div class="page-ui-i18n" :class="{ 'page-ui-i18n--hide': localeHidden }">
+    <!-- 面串输入固定左上宽区，与下方窄按钮栏分离，减少左侧整条遮挡魔方命中区 -->
+    <div class="app-io-layer">
+        <div class="toolbar__io-block">
+        <section class="facelets54 card facelets54--corner" aria-label="facelets54">
+          <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
+          <div class="facelets54__input-row">
+            <div class="facelets54__input-wrap">
+              <textarea
+                ref="facelets54InputRef"
+                v-model="facelets54Draft"
+                class="facelets54__textarea"
+                rows="1"
+                spellcheck="false"
+                wrap="off"
+                :aria-label="t('facelets.label', { n: facelets54CompactLen })"
+              />
+              <span class="facelets54__counter">{{ t('facelets.counter', { n: facelets54CompactLen }) }}</span>
+            </div>
+            <button type="button" class="toolbar__btn-sm facelets54__apply" @click="applyFacelets54FromInput">
+              {{ t('facelets.apply') }}
+            </button>
           </div>
-          <ul class="constraints" role="list">
-            <li v-for="row in userConstraintRows" :key="row.id">
-              <button
-                type="button"
-                class="constraint"
-                :class="{
-                  'constraint--pass': row.status === 'pass',
-                  'constraint--fail': row.status === 'fail',
-                  'constraint--skip': row.status === 'skipped',
-                  'constraint--active': selectedUserConstraintId === row.id,
-                }"
-                :disabled="row.status === 'skipped'"
-                :aria-pressed="selectedUserConstraintId === row.id"
-                @click.stop="toggleUserConstraintHighlight(row.id)"
+        </section>
+
+        <div
+          class="solver-strip"
+          :class="{ 'solver-strip--visible': solverStripVisible }"
+          :aria-hidden="!solverStripVisible"
+        >
+          <p v-if="solverError" class="solver-err solver-err--in-strip">{{ solverError }}</p>
+          <template v-else-if="solutionMoves.length > 0">
+            <div class="solver-strip__panel">
+              <div class="solver-strip__body">
+                <p class="solver-info__lead">
+                  <template v-if="solutionIsReverse">
+                    {{ t('solver.lead.reverse', { cur: solutionStepIndex, total: solutionMoves.length }) }}
+                  </template>
+                  <template v-else>
+                    {{ t('solver.lead.forward', { cur: solutionStepIndex, total: solutionMoves.length }) }}
+                  </template>
+                </p>
+                <ol
+                  class="solver-steps"
+                  :aria-label="solutionIsReverse ? t('solver.stepsAriaReverse') : t('solver.stepsAriaForward')"
+                >
+                  <li
+                    v-for="(m, i) in solutionMoves"
+                    :key="`${i}-${m}`"
+                    class="solver-steps__item"
+                    :class="{
+                      'solver-steps__item--done':
+                        solutionIsReverse
+                          ? !reverseAwaitingFirstNext && i < solutionStepIndex
+                          : i < solutionStepIndex,
+                      'solver-steps__item--current':
+                        solutionIsReverse
+                          ? !reverseAwaitingFirstNext &&
+                            i === solutionStepIndex &&
+                            solutionStepIndex < solutionMoves.length
+                          : i === solutionStepIndex,
+                      'solver-steps__item--pending':
+                        solutionIsReverse
+                          ? reverseAwaitingFirstNext ||
+                            i > solutionStepIndex ||
+                            (i === solutionStepIndex && solutionStepIndex >= solutionMoves.length)
+                          : i > solutionStepIndex,
+                    }"
+                  >
+                    <span class="solver-steps__move">{{ m }}</span>
+                  </li>
+                </ol>
+              </div>
+              <div class="solver-strip__footer">
+                <button
+                  type="button"
+                  class="toolbar__btn-sm solver-next-btn"
+                  :disabled="!canAdvanceSolutionStep || solverLoading || solutionAnimating"
+                  @click="nextSolutionStep"
+                >
+                  {{ t('solver.next') }}
+                </button>
+              </div>
+            </div>
+          </template>
+          <p v-else-if="solverBanner" class="solver-banner solver-banner--in-strip">{{ solverBanner }}</p>
+          <div v-else class="solver-strip__placeholder" aria-hidden="true" />
+        </div>
+        </div>
+    </div>
+
+    <div class="app-grid">
+      <aside class="toolbar toolbar--left" :aria-label="t('app.aria.toolbar')">
+        <button type="button" class="toolbar__primary" @click="setSolved">{{ t('toolbar.solved') }}</button>
+        <div class="toolbar__random-wrap">
+          <button
+            ref="randomBtnRef"
+            type="button"
+            class="toolbar__primary"
+            :disabled="!canUseRandomButton"
+            @click="onRandomMainButtonClick"
+          >
+            {{ t('toolbar.random') }}
+          </button>
+          <Teleport to="body">
+            <Transition name="mac-float">
+              <div
+                v-if="randomPopoverOpen"
+                class="random-popover mac-float-surface"
+                :style="randomPopoverBoxStyle"
+                role="menu"
+                :aria-label="t('toolbar.randomMenu')"
               >
-                <span class="constraint__status" :data-status="row.status">{{
-                  row.status === 'pass' ? '通过' : row.status === 'fail' ? '未通过' : '未校验'
-                }}</span>
-                <span class="constraint__title">{{ row.title }}</span>
-                <span class="constraint__desc">{{ row.intro }}</span>
+                <button
+                  type="button"
+                  class="random-popover__btn"
+                  role="menuitem"
+                  @click="onRandomPopoverPickAll"
+                >
+                  {{ t('toolbar.randomAll') }}
+                </button>
+                <button
+                  type="button"
+                  class="random-popover__btn"
+                  role="menuitem"
+                  @click="onRandomPopoverPickRest"
+                >
+                  {{ t('toolbar.randomRest') }}
+                </button>
+              </div>
+            </Transition>
+          </Teleport>
+        </div>
+        <button type="button" class="toolbar__primary" @click="clearExceptCenters">{{ t('toolbar.clear') }}</button>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="!canUndo || solutionAnimating"
+          @click="undoFacelets"
+        >
+          {{ t('toolbar.undo') }}
+        </button>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="!canFillFaceUniqueConstraint"
+          @click="fillOneFaceUniqueConstraintCandidates"
+        >
+          {{ t('toolbar.fillUnique') }}
+        </button>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
+          @click="fetchSolution"
+        >
+          {{ solverLoading ? t('toolbar.solverLoading') : t('toolbar.steps') }}
+        </button>
+        <button
+          type="button"
+          class="toolbar__primary"
+          :disabled="solverLoading || solutionAnimating || !faceletsComplete || !report.ok"
+          @click="fetchReverseSolution"
+        >
+          {{ solverLoading ? t('toolbar.solverLoading') : t('toolbar.reverseSteps') }}
+        </button>
+      </aside>
+
+      <aside class="app-side-column" :aria-label="t('app.aria.side')">
+        <section class="header-theme card" :aria-label="t('theme.faceColors')">
+          <div class="header-theme__inner">
+            <div class="face-theme face-theme--inline" :aria-label="t('theme.faceSwatches')">
+              <div class="face-theme__row" role="group">
+                <label
+                  v-for="f in FACES"
+                  :key="f"
+                  class="face-theme__swatch"
+                >
+                  <span class="face-theme__tile" :style="{ backgroundColor: faceDisplayColors[f] }" />
+                  <span class="face-theme__lbl">{{ f }}</span>
+                  <input
+                    class="face-theme__color"
+                    type="color"
+                    :value="faceDisplayColors[f]"
+                    @input="setFaceDisplayColor(f, ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+              </div>
+              <button type="button" class="toolbar__btn-sm face-theme__reset" @click="resetFaceDisplayColors">
+                {{ t('theme.reset') }}
               </button>
-            </li>
-          </ul>
+            </div>
+            <label class="semi-opacity">
+              <input
+                v-model.number="transparencyPercent"
+                class="semi-opacity__range"
+                :style="{ '--semi-opacity-pct': `${transparencyPercent}%` }"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="transparencyPercent"
+                :aria-label="t('theme.opacityAria')"
+              />
+            </label>
+          </div>
+        </section>
+
+        <div class="panel panel--constraints" :aria-label="t('constraints.panel')">
+          <div class="constraints-drawer" @click="onConstraintsDrawerBackgroundClick">
+            <div class="status" :class="report.ok ? 'status--ok' : 'status--bad'">
+              {{ report.ok ? t('constraints.statusOk') : t('constraints.statusBad') }}
+            </div>
+            <ul class="constraints" role="list">
+              <li v-for="row in userConstraintRows" :key="row.id">
+                <button
+                  type="button"
+                  class="constraint"
+                  :class="{
+                    'constraint--pass': row.status === 'pass',
+                    'constraint--fail': row.status === 'fail',
+                    'constraint--skip': row.status === 'skipped',
+                    'constraint--active': selectedUserConstraintId === row.id,
+                  }"
+                  :disabled="row.status === 'skipped'"
+                  :aria-pressed="selectedUserConstraintId === row.id"
+                  @click.stop="toggleUserConstraintHighlight(row.id)"
+                >
+                  <span class="constraint__status" :data-status="row.status">{{
+                    row.status === 'pass'
+                      ? t('constraints.pass')
+                      : row.status === 'fail'
+                        ? t('constraints.fail')
+                        : t('constraints.skipped')
+                  }}</span>
+                  <span class="constraint__title">{{ row.title }}</span>
+                  <span class="constraint__desc">{{ row.intro }}</span>
+                </button>
+              </li>
+            </ul>
+          </div>
         </div>
       </aside>
     </div>
+
+    <Transition name="mac-float">
+      <div
+        v-if="selectedCell !== null"
+        class="picker-anchor"
+        :style="pickerFloatingStyle"
+      >
+        <div class="picker picker--floating card mac-float-surface">
+          <ColorCandidateBar
+            :candidates="pickerBarCandidates"
+            :face-colors="faceDisplayColors"
+            :constraint-allowed-faces="constraintAllowedFacesForPicker"
+            :disable-empty-chip="pickerDisableEmptyChip"
+            @pick="applyPick"
+          />
+        </div>
+      </div>
+    </Transition>
 
     <template v-if="SHOW_DEV_CUBE_ENUM_JSON">
     <section class="edge-enum card" aria-label="棱块补全枚举">
@@ -1487,19 +1723,19 @@ function applySelectedParityIncompleteEnumeration() {
       <p v-else class="cube-json__err">{{ cubeJsonState.text }}</p>
     </section>
     </template>
+    </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .page {
-  --glass-bg: rgba(255, 255, 255, 0.42);
-  --glass-bg-strong: rgba(255, 255, 255, 0.58);
-  --glass-border: rgba(0, 0, 0, 0.1);
   --glass-blur: blur(16px);
 
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 1.5rem 1rem 3rem;
+  position: relative;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
   font-family:
     system-ui,
     -apple-system,
@@ -1508,31 +1744,333 @@ function applySelectedParityIncompleteEnumeration() {
     'Helvetica Neue',
     Arial,
     sans-serif;
-  color: #1a1a1a;
-  background: linear-gradient(165deg, #e4e9f2 0%, #f0f2f7 45%, #e8eaee 100%);
+  color: var(--ui-text);
+  background: transparent;
+  transition: color 0.45s ease;
+}
+
+.page-cube-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: auto;
+  background: transparent;
+  transition: background 0.55s ease;
+}
+
+.view-3d--fullscreen {
+  width: 100%;
+  height: 100%;
   min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.page-cube-layer :deep(.cube-3d) {
+  width: 100%;
+  height: 100%;
+  min-height: min(100vh, 100dvh);
+  max-width: none;
+  border-radius: 0;
+}
+
+.page-ui {
+  /** 与 .app-io-layer 共用，避免 fixed 相对视口而主内容在 body margin 内导致左右错位 */
+  --page-ui-pad-x: clamp(0.75rem, 2vw, 1.25rem);
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 1.5rem var(--page-ui-pad-x) 3rem;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.page-ui > * {
+  pointer-events: auto;
+}
+
+/** 勿对含 fixed 子元素的祖先使用 filter，否则 fixed 会相对该层定位导致跳动 */
+.page-ui > .page-ui-i18n {
+  pointer-events: none;
+  transition: opacity 0.35s ease;
+}
+
+.page-ui-i18n > * {
+  pointer-events: auto;
+}
+
+.page-ui-i18n--hide {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.page-ui-i18n--hide > * {
+  pointer-events: none;
+}
+
+.app-chrome {
+  position: fixed;
+  z-index: 60;
+  top: 1rem;
+  right: clamp(0.75rem, 2vw, 1.25rem);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  pointer-events: auto;
+}
+
+.app-chrome__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 0.45rem;
+  border: 1px solid var(--hairline);
+  background: var(--glass-bg);
+  color: var(--ui-text);
+  cursor: pointer;
+  backdrop-filter: var(--glass-blur);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.07);
+  transition:
+    background 0.45s ease,
+    color 0.45s ease,
+    border-color 0.45s ease,
+    box-shadow 0.45s ease,
+    transform 0.15s ease;
+}
+
+.app-chrome__icon:hover {
+  background: var(--accent-soft);
+  border-color: var(--hairline-strong);
+}
+
+.app-chrome__icon:active {
+  transform: scale(0.96);
+}
+
+.app-chrome__svg {
+  display: block;
+}
+
+.app-chrome__lang {
+  display: inline-flex;
+  flex-direction: row;
+  border-radius: 0.45rem;
+  border: 1px solid var(--hairline);
+  background: var(--glass-bg);
+  color: var(--ui-text);
+  overflow: hidden;
+  backdrop-filter: var(--glass-blur);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.07);
+  transition: background 0.45s ease, border-color 0.45s ease, box-shadow 0.45s ease;
+}
+
+.app-chrome__lang-btn {
+  margin: 0;
+  padding: 0.38rem 0.72rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.4s ease, color 0.4s ease;
+}
+
+.app-chrome__lang-btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.app-chrome__lang-btn:not(.app-chrome__lang-btn--on):hover {
+  background: var(--chrome-hover);
+}
+
+.chrome-ico-enter-active,
+.chrome-ico-leave-active {
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+
+.chrome-ico-enter-from,
+.chrome-ico-leave-to {
+  opacity: 0;
+  transform: rotate(-18deg) scale(0.85);
+}
+
+/** 输入 + 步骤：与窄按钮栏分离，固定左上，宽可达 70ch，不拉长左侧命中条 */
+.app-io-layer {
+  position: fixed;
+  z-index: 2;
+  left: var(--page-ui-pad-x);
+  top: 1.5rem;
+  max-width: min(70ch, calc(100vw - 280px));
+  width: min(53ch, calc(100vw - 2 * var(--page-ui-pad-x)));
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.app-io-layer > * {
+  pointer-events: auto;
+}
+
+.app-io-layer .toolbar__io-block {
+  max-height: min(60vh, 28rem);
+  overflow-y: auto;
+}
+
+.app-grid {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem 1.5rem;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.toolbar--left,
+.app-side-column {
+  pointer-events: auto;
+}
+
+.toolbar__io-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.app-side-column {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+  min-width: 0;
+  width: min(260px, 100%);
+  max-width: 260px;
+  position: sticky;
+  top: 1rem;
+  align-self: flex-start;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  text-align: left;
+  /** 为右上角主题/语言控件留出空间 */
+  padding-top: 2.6rem;
+  box-sizing: border-box;
+}
+
+.app-side-column .semi-opacity {
+  width: 100%;
+}
+
+.app-side-column .semi-opacity__range {
+  width: min(10rem, 100%);
+  max-width: 100%;
+}
+
+.app-side-column .header-theme.card {
+  margin-top: 0;
+}
+
+.header-theme__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.55rem;
+  padding-left: 0.52rem;
+  padding-right: 0.72rem;
+  box-sizing: border-box;
 }
 
 .toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  margin: 1.25rem 0;
-  padding: 0.65rem 0.85rem;
-  border-radius: 12px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.45) inset;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.toolbar--left {
+  flex: 0 1 auto;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  min-width: 0;
+  /** 仅按钮列：约 9em 字宽 + 边距，不再与输入区同宽 */
+  width: min(100%, 11.5rem);
+  max-width: min(11.5rem, max(10rem, 28vw));
+  /** 只把左侧按钮列下移，避免与固定输入区重叠；勿写在 .app-grid 上，否则右侧栏会一起被顶下去 */
+  margin-top: clamp(10rem, 28vh, 20rem);
+}
+
+/** 左栏按钮统一为约九字宽（1em≈一个汉字宽），超出省略 */
+.toolbar--left > button,
+.toolbar--left > .toolbar__random-wrap {
+  align-self: flex-start;
+  width: 9em;
+  min-width: 9em;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+.toolbar--left .toolbar__random-wrap > .toolbar__primary {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.toolbar__io-block .toolbar__primary {
+  align-self: flex-start;
+  width: 9em;
+  min-width: 9em;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+.toolbar__io-block .toolbar__btn-sm {
+  align-self: center;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
 }
 
 .toolbar__random-wrap {
   position: relative;
-  display: inline-flex;
+  /** 与 .toolbar button 同字号，否则 9em 相对继承的 1rem 算，会比子按钮（0.875rem）上 9em 更宽 */
+  font-size: 0.875rem;
+  display: flex;
   flex-direction: column;
   align-items: stretch;
-  vertical-align: top;
+  min-width: 0;
 }
 
 .toolbar__random-wrap > .toolbar__primary {
@@ -1540,8 +2078,8 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .random-popover {
-  position: absolute;
-  z-index: 100;
+  position: fixed;
+  z-index: 10000;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1562,7 +2100,7 @@ function applySelectedParityIncompleteEnumeration() {
   font: inherit;
   font-size: 0.75rem;
   font-weight: 650;
-  color: #1a1a1a;
+  color: var(--ui-text);
   text-align: center;
   cursor: pointer;
   transition: background 0.12s;
@@ -1585,15 +2123,14 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .mac-float-surface {
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.48);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.06),
-    0 2px 8px rgba(0, 0, 0, 0.06),
-    0 12px 28px rgba(0, 0, 0, 0.1);
-  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--glass-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.07);
+  border-radius: 8px;
+  transition:
+    background 0.45s ease,
+    border-color 0.45s ease,
+    box-shadow 0.45s ease;
 }
 
 .mac-float-enter-active,
@@ -1608,32 +2145,74 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .toolbar button {
-  padding: 0.45rem 0.85rem;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  padding: 0.38rem 0.72rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: transparent;
   cursor: pointer;
   font-size: 0.875rem;
 }
 
-.toolbar button:hover {
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.toolbar .muted {
-  color: #555;
-}
-
-.toolbar__primary {
-  border-color: #2563eb !important;
-  color: #1e40af;
+.toolbar button.toolbar__btn-sm {
+  padding: 0.22rem 0.42rem;
+  font-size: 0.78rem;
+  border-color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
+.toolbar button:hover {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: var(--hairline-strong);
+}
+
+.toolbar button.toolbar__btn-sm:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/** 小号主按钮：与主工具条同色线框，用于「应用」「重置」等 */
+.toolbar__btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.22rem 0.42rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.2;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  color: var(--accent-text);
+  background: transparent;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition:
+    background 0.45s ease,
+    color 0.45s ease,
+    border-color 0.45s ease;
+}
+
+.toolbar__btn-sm:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.toolbar__btn-sm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toolbar__primary {
+  border-color: var(--accent) !important;
+  color: var(--accent-text);
+  font-weight: 600;
+  transition:
+    background 0.45s ease,
+    color 0.45s ease,
+    border-color 0.45s ease;
+}
+
 .toolbar__primary:hover:not(:disabled) {
-  background: rgba(239, 246, 255, 0.92) !important;
+  background: var(--accent-soft) !important;
 }
 
 .toolbar__primary:disabled {
@@ -1641,32 +2220,69 @@ function applySelectedParityIncompleteEnumeration() {
   cursor: not-allowed;
 }
 
-.solver-info,
-.solver-err {
-  margin: 0.35rem 0 0;
+/** 求解步骤条：无求解结果时隐藏；有步骤/错误/横幅时显示 */
+.solver-strip {
+  display: none;
   font-size: 0.88rem;
   line-height: 1.45;
 }
 
-.solver-banner {
-  margin: 0.35rem 0 0;
-  padding: 0.45rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid rgba(22, 101, 52, 0.18);
-  color: #166534;
-  background: rgba(232, 248, 239, 0.42);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+.solver-strip--visible {
+  display: block;
 }
 
-.solver-info {
-  color: #1e3a5f;
-  padding: 0.5rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+.solver-strip__placeholder {
+  min-height: 3.25rem;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px dashed var(--hairline);
+  background: transparent;
+}
+
+.solver-strip__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  color: var(--solver-text);
+  box-shadow: none;
+  transition: color 0.45s ease;
+}
+
+.solver-strip__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+/** 与 facelets54「应用」同为 .toolbar__btn-sm，此处仅保证在步骤条里不收缩 */
+.solver-next-btn {
+  flex-shrink: 0;
+}
+
+.solver-strip__body {
+  flex: 1;
+  min-width: min(100%, 18rem);
+}
+
+.solver-err--in-strip,
+.solver-banner--in-strip {
+  margin: 0;
+}
+
+.solver-banner {
+  padding: 0.25rem 0;
+  border-radius: 0;
+  border: none;
+  color: var(--solver-banner);
+  background: transparent;
+  transition: color 0.45s ease;
 }
 
 .solver-info__lead {
@@ -1685,25 +2301,23 @@ function applySelectedParityIncompleteEnumeration() {
 
 .solver-steps__item {
   margin: 0;
-  padding: 0.12rem 0.45rem;
+  padding: 0.1rem 0.35rem;
   border-radius: 4px;
-  border: 1px solid rgba(191, 219, 254, 0.65);
-  background: rgba(248, 250, 252, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--hairline);
+  background: transparent;
   font-size: 0.82rem;
   font-variant-numeric: tabular-nums;
 }
 
 .solver-steps__item--done {
   color: #64748b;
-  border-color: rgba(203, 213, 225, 0.75);
-  background: rgba(241, 245, 249, 0.5);
+  border-color: transparent;
+  background: transparent;
 }
 
 .solver-steps__item--current {
-  border-color: rgba(37, 99, 235, 0.65);
-  background: rgba(239, 246, 255, 0.65);
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(239, 246, 255, 0.4);
   font-weight: 700;
   color: #1e40af;
 }
@@ -1714,24 +2328,50 @@ function applySelectedParityIncompleteEnumeration() {
 
 .solver-err {
   color: #a8281e;
-  padding: 0.45rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid rgba(168, 40, 30, 0.22);
-  background: rgba(253, 236, 234, 0.45);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-
-.layout {
-  display: grid;
-  grid-template-columns: 1fr minmax(min-content, 420px);
-  gap: 1.5rem;
-  align-items: start;
+  padding: 0.25rem 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
 }
 
 @media (max-width: 900px) {
-  .layout {
-    grid-template-columns: 1fr;
+  .app-io-layer {
+    position: static;
+    left: auto;
+    top: auto;
+    z-index: auto;
+    width: 100%;
+    max-width: none;
+    margin-bottom: 0.65rem;
+  }
+
+  .app-io-layer .toolbar__io-block {
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  .app-grid {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar--left {
+    position: static;
+    max-height: none;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    max-width: none;
+    width: 100%;
+    margin-top: 0;
+  }
+
+  .app-side-column {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    max-width: none;
+    width: 100%;
   }
 }
 
@@ -1739,32 +2379,91 @@ function applySelectedParityIncompleteEnumeration() {
   min-width: 0;
 }
 
+.view-3d--centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
 .semi-opacity {
   display: inline-flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem 0.55rem;
-  font-size: 0.78rem;
-  color: #3a3d47;
+  margin: 0;
+  padding: 0;
   user-select: none;
 }
 
-.semi-opacity__label {
-  white-space: nowrap;
-  font-weight: 600;
-}
-
+/** 细线条轨道 + 圆形滑块，无描边；染色与滑块同色半透明，填充端止于圆前避免叠色发暗 */
 .semi-opacity__range {
+  --semi-opacity-pct: 0%;
+  --semi-opacity-fill: color-mix(in srgb, var(--accent) 58%, transparent);
+  --semi-opacity-thumb-bg: var(--semi-opacity-fill);
   width: min(10rem, 36vw);
+  height: 1.35rem;
+  margin: 0;
+  padding: 0;
   vertical-align: middle;
-  accent-color: #6366f1;
+  cursor: pointer;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
-.semi-opacity__value {
-  min-width: 2.75rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 650;
-  color: #2d3140;
+.semi-opacity__range:focus {
+  outline: none;
+}
+
+.semi-opacity__range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.semi-opacity__range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--semi-opacity-fill) 0,
+    var(--semi-opacity-fill) max(0%, calc(var(--semi-opacity-pct) - 6px)),
+    var(--semi-opacity-track) max(0%, calc(var(--semi-opacity-pct) - 6px)),
+    var(--semi-opacity-track) 100%
+  );
+}
+
+.semi-opacity__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--semi-opacity-thumb-bg);
+  border: none;
+  box-shadow: none;
+}
+
+.semi-opacity__range::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--semi-opacity-track);
+}
+
+.semi-opacity__range::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--semi-opacity-fill);
+}
+
+.semi-opacity__range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--semi-opacity-thumb-bg);
+  border: none;
+  box-shadow: none;
 }
 
 .picker-anchor {
@@ -1774,17 +2473,17 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .picker.card {
-  background: rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(0, 0, 0, 0.09);
-  border-radius: 12px;
-  padding: 0.65rem 0.75rem;
+  background: var(--glass-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  transition: background 0.45s ease, border-color 0.45s ease;
 }
 
 .picker.card.mac-float-surface {
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid var(--hairline);
+  background: var(--glass-bg);
 }
 
 .picker--floating {
@@ -1795,54 +2494,25 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .panel {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border-radius: 12px;
-  padding: 1rem 1.1rem;
-  border: 1px solid var(--glass-border);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  background: transparent;
+  backdrop-filter: none;
+  border-radius: 0;
+  padding: 0;
+  border: none;
+  box-shadow: none;
 }
 
 .panel--constraints {
-  position: sticky;
-  top: 1rem;
-  max-height: calc(100vh - 2rem);
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.55rem;
+  gap: 0.5rem;
   min-height: 0;
-}
-
-.panel--constraints--collapsed {
-  max-height: none;
-  width: max-content;
-  max-width: 100%;
-  align-self: start;
-}
-
-.constraints-toggle {
-  flex-shrink: 0;
-  padding: 0.45rem 0.85rem;
-  border-radius: 8px;
-  border: 1px solid rgba(37, 99, 235, 0.45);
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  color: #1e40af;
-  font-weight: 600;
-  font-size: 0.875rem;
-  cursor: pointer;
-  align-self: flex-end;
-}
-
-.constraints-toggle:hover {
-  background: rgba(239, 246, 255, 0.75);
-}
-
-.panel--constraints--collapsed .constraints-toggle {
-  align-self: stretch;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  max-height: min(60vh, 520px);
+  background: transparent;
 }
 
 .constraints-drawer {
@@ -1851,33 +2521,43 @@ function applySelectedParityIncompleteEnumeration() {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  min-width: min(100vw - 2rem, 280px);
+  min-width: 0;
 }
 
-.panel--constraints:not(.panel--constraints--collapsed) .constraints-drawer .constraints {
+.panel--constraints .constraints-drawer .constraints {
   flex: 1;
   min-height: 0;
 }
 
 .status {
+  position: relative;
   font-weight: 600;
-  padding: 0.5rem 0.65rem;
-  border-radius: 8px;
-  font-size: 0.9rem;
+  padding: 0 0.62rem 0.35rem;
+  border-radius: 0;
+  font-size: 0.82rem;
+  border-bottom: none;
+  margin-bottom: 0.15rem;
+  box-sizing: border-box;
+}
+
+.status::after {
+  content: '';
+  position: absolute;
+  left: 0.32rem;
+  right: 0.32rem;
+  bottom: 0;
+  height: 1px;
+  background: var(--hairline);
 }
 
 .status--ok {
-  background: rgba(232, 248, 239, 0.65);
+  background: transparent;
   color: #1e7a45;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 
 .status--bad {
-  background: rgba(253, 236, 234, 0.65);
+  background: transparent;
   color: #a8281e;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 
 .constraints {
@@ -1893,29 +2573,34 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .constraint {
+  position: relative;
   width: 100%;
   text-align: left;
-  padding: 0.55rem 0.65rem;
-  border-radius: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(250, 250, 250, 0.45);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  padding: 0.45rem 0.62rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
   cursor: pointer;
   font: inherit;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 0.2rem;
+  box-sizing: border-box;
   transition:
-    border-color 0.12s,
-    box-shadow 0.12s,
-    background 0.12s;
+    border-color 0.2s ease,
+    opacity 0.35s ease;
 }
 
-.constraint:hover:not(:disabled) {
-  background: rgba(243, 244, 246, 0.72);
-  border-color: rgba(0, 0, 0, 0.12);
+.constraints li:not(:last-child) .constraint::after {
+  content: '';
+  position: absolute;
+  left: 0.32rem;
+  right: 0.32rem;
+  bottom: 0;
+  height: 1px;
+  background: var(--hairline);
 }
 
 .constraint:disabled {
@@ -1924,9 +2609,9 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .constraint--active:not(:disabled) {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 1px #2563eb;
-  background: rgba(239, 246, 255, 0.72);
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: var(--accent-soft);
 }
 
 .constraint__status {
@@ -1950,24 +2635,28 @@ function applySelectedParityIncompleteEnumeration() {
 .constraint__title {
   font-size: 0.84rem;
   font-weight: 650;
-  color: #1a1a1a;
+  color: var(--ui-text);
+  transition: color 0.35s ease;
+}
+
+.constraint--active:not(:disabled) .constraint__title {
+  color: var(--accent-text);
 }
 
 .constraint__desc {
   font-size: 0.72rem;
   line-height: 1.45;
-  color: #5c5c5c;
+  color: var(--constraint-desc);
+  transition: color 0.35s ease;
 }
 
 .edge-enum.card {
   margin-top: 1.5rem;
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  padding: 1rem 1.1rem 1.15rem;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 1rem 0 0;
+  box-shadow: none;
 }
 
 .edge-enum__hint {
@@ -2000,11 +2689,9 @@ function applySelectedParityIncompleteEnumeration() {
 .edge-enum__select-input {
   min-width: 5.5rem;
   padding: 0.38rem 0.55rem;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.45);
   font-size: 0.85rem;
 }
 
@@ -2017,11 +2704,9 @@ function applySelectedParityIncompleteEnumeration() {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.72rem;
   line-height: 1.4;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  background: rgba(246, 247, 249, 0.55);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.45);
   color: #1a1a1a;
   resize: vertical;
   min-height: 12rem;
@@ -2030,13 +2715,11 @@ function applySelectedParityIncompleteEnumeration() {
 
 .cube-json.card {
   margin-top: 1.5rem;
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  padding: 1rem 1.1rem 1.15rem;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 1rem 0 0;
+  box-shadow: none;
 }
 
 .cube-json__title {
@@ -2055,12 +2738,10 @@ function applySelectedParityIncompleteEnumeration() {
 
 .cube-json__pre {
   margin: 0;
-  padding: 0.75rem 0.9rem;
-  background: rgba(246, 247, 249, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.09);
+  padding: 0.65rem 0.75rem;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
   font-size: 0.78rem;
   line-height: 1.45;
   overflow: auto;
@@ -2079,52 +2760,50 @@ function applySelectedParityIncompleteEnumeration() {
   color: #a8281e;
 }
 
+.header-theme.card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
 .facelets54.card {
   margin-top: 1.5rem;
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  padding: 0.85rem 1rem 1rem;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
 }
 
-.facelets54__row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 1rem 1.35rem;
+.app-io-layer .facelets54.card {
+  margin-top: 0;
 }
 
-.facelets54__theme-side {
+.facelets54__input-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.85rem 1.15rem;
-  flex: 0 1 auto;
-}
-
-.facelets54__left {
-  flex: 1 1 14rem;
-  min-width: 0;
+  gap: 0.5rem 0.65rem;
 }
 
 .facelets54__input-wrap {
   position: relative;
-  width: fit-content;
-  max-width: 100%;
+  flex: 1 1 70ch;
+  min-width: min(100%, 70ch);
+  max-width: 70ch;
 }
 
 .facelets54__textarea {
   box-sizing: border-box;
   display: block;
-  width: 54ch;
-  max-width: 100%;
+  width: 100%;
+  max-width: 70ch;
   height: 2.05rem;
   min-height: 2.05rem;
-  margin: 0 0 0.5rem;
-  padding: 0.32rem 3.6rem 0.32rem 0.4rem;
+  margin: 0;
+  padding: 0.32rem 3.6rem 0.28rem 0.15rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.78rem;
   line-height: 1.35;
@@ -2132,18 +2811,18 @@ function applySelectedParityIncompleteEnumeration() {
   overflow-x: auto;
   overflow-y: hidden;
   resize: none;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(255, 255, 255, 0.52);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  color: #1a1a1a;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: var(--ui-text);
+  transition: color 0.45s ease, border-color 0.45s ease;
 }
 
 .facelets54__textarea:focus {
   outline: none;
-  border-color: #5b7cfa;
-  box-shadow: 0 0 0 2px rgba(91, 124, 250, 0.2);
+  border-bottom-color: #5b7cfa;
+  box-shadow: none;
 }
 
 .facelets54__counter {
@@ -2153,16 +2832,13 @@ function applySelectedParityIncompleteEnumeration() {
   pointer-events: none;
   font-size: 0.65rem;
   font-variant-numeric: tabular-nums;
-  color: rgba(75, 78, 90, 0.95);
+  color: var(--ui-muted);
   line-height: 1;
   user-select: none;
 }
 
-.facelets54__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
+.facelets54__apply {
+  flex-shrink: 0;
 }
 
 .facelets54__err {
@@ -2178,6 +2854,24 @@ function applySelectedParityIncompleteEnumeration() {
   align-items: center;
   gap: 0.45rem;
   padding-top: 0.1rem;
+}
+
+/** 须写在 .face-theme 之后，否则 flex-direction:column 会盖掉横排 */
+.face-theme.face-theme--inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  gap: 0.35rem 0.5rem;
+}
+
+.face-theme.face-theme--inline .face-theme__row {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
 }
 
 .face-theme__row {
@@ -2203,18 +2897,20 @@ function applySelectedParityIncompleteEnumeration() {
 .face-theme__tile {
   width: 1.48rem;
   height: 1.48rem;
-  border: 2px solid #141414;
+  border: 2px solid var(--tile-border);
   border-radius: 2px;
   box-sizing: border-box;
   flex-shrink: 0;
+  transition: border-color 0.45s ease;
 }
 
 .face-theme__lbl {
   font-size: 0.6rem;
   font-weight: 700;
-  color: #3a3a3a;
+  color: var(--face-lbl);
   line-height: 1;
   user-select: none;
+  transition: color 0.45s ease;
 }
 
 .face-theme__color {
@@ -2232,18 +2928,96 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .face-theme__reset {
-  padding: 0.32rem 0.65rem;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(250, 250, 250, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  font-size: 0.78rem;
-  color: #444;
-  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0;
+  /** 勿用 font:inherit，否则会盖掉 .toolbar__btn-sm 的 0.78rem，与「应用」不一致 */
+}
+</style>
+
+<style>
+/** fixed 的 .app-io-layer 相对视口定位；若 body 有默认 margin，会与 .page-ui 内流式内容错开 */
+html,
+body {
+  margin: 0;
 }
 
-.face-theme__reset:hover {
-  background: rgba(238, 238, 238, 0.75);
+html[data-theme='light'] {
+  color-scheme: light;
+  --ui-text: #1a1a1a;
+  --ui-muted: rgba(75, 78, 90, 0.95);
+  --hairline: rgba(0, 0, 0, 0.09);
+  --hairline-strong: rgba(0, 0, 0, 0.14);
+  --glass-bg: rgba(255, 255, 255, 0.5);
+  --glass-border: rgba(0, 0, 0, 0.1);
+  --accent: #2563eb;
+  --accent-text: #1e40af;
+  --accent-soft: rgba(239, 246, 255, 0.65);
+  --chrome-hover: rgba(0, 0, 0, 0.05);
+  --solver-text: #1e3a5f;
+  --solver-banner: #166534;
+  --face-lbl: #3a3a3a;
+  --tile-border: #141414;
+  --chip-inset: rgba(255, 255, 255, 0.25);
+  --constraint-desc: #5c5c5c;
+  --semi-opacity-track: rgba(0, 0, 0, 0.11);
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+  --ui-text: #e8eaed;
+  --ui-muted: rgba(203, 213, 225, 0.88);
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --glass-bg: rgba(28, 32, 42, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --accent: #60a5fa;
+  --accent-text: #bfdbfe;
+  --accent-soft: rgba(59, 130, 246, 0.22);
+  --chrome-hover: rgba(255, 255, 255, 0.08);
+  --solver-text: #c7d2fe;
+  --solver-banner: #86efac;
+  --face-lbl: #cbd5e1;
+  --tile-border: #1e293b;
+  --chip-inset: rgba(255, 255, 255, 0.08);
+  --constraint-desc: #94a3b8;
+  --semi-opacity-track: rgba(255, 255, 255, 0.14);
+}
+
+html[data-theme='light'] .page-cube-layer {
+  background-color: #f4e8dc;
+  background-image:
+    radial-gradient(ellipse 100% 68% at 50% 16%, rgba(255, 248, 235, 0.72) 0%, transparent 54%),
+    radial-gradient(ellipse 70% 45% at 80% 20%, rgba(255, 220, 190, 0.35) 0%, transparent 50%),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 3px,
+      rgba(120, 80, 40, 0.028) 3px,
+      rgba(120, 80, 40, 0.028) 6px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 3px,
+      rgba(120, 80, 40, 0.028) 3px,
+      rgba(120, 80, 40, 0.028) 6px
+    ),
+    linear-gradient(168deg, #fff9f2 0%, #f5e6d6 38%, #e9d8c8 72%, #dec9b8 100%);
+  background-attachment: fixed;
+}
+
+html[data-theme='dark'] .page-cube-layer {
+  background-color: #0a0c10;
+  background-image:
+    radial-gradient(ellipse 90% 55% at 50% 12%, rgba(96, 165, 250, 0.22) 0%, transparent 55%),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 4px,
+      rgba(255, 255, 255, 0.016) 4px,
+      rgba(255, 255, 255, 0.016) 8px
+    ),
+    linear-gradient(168deg, #0c0e14 0%, #141a2d 42%, #0a0d12 100%);
+  background-attachment: fixed;
 }
 </style>

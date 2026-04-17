@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, inject } from 'vue';
 import type { FaceId } from '../cube/types';
+
+const t = inject<(k: string) => string>('i18nT', (k: string) => k);
 
 const props = defineProps<{
   candidates: readonly (FaceId | null)[];
@@ -29,7 +31,7 @@ defineEmits<{
 </script>
 
 <template>
-  <div class="bar" role="group" aria-label="候选颜色">
+  <div class="bar" role="group" :aria-label="t('picker.candidates')">
     <button
       v-for="(c, i) in candidates"
       :key="i"
@@ -39,13 +41,6 @@ defineEmits<{
         'chip--empty': c === null,
         'chip--constraint-muted': isChipConstraintMuted(c),
       }"
-      :title="
-        isChipConstraintMuted(c)
-          ? c === null
-            ? '当前约束链下置空可能不通过，仍可点击'
-            : '不在约束链候选集合内，仍可点击选择'
-          : undefined
-      "
       :style="
         c === null
           ? { background: '#52525b', color: '#f4f4f5' }
@@ -53,8 +48,21 @@ defineEmits<{
       "
       @click="$emit('pick', c)"
     >
-      <span class="chip__lbl">{{ c === null ? '空' : c }}</span>
-      <span v-if="isChipConstraintMuted(c)" class="chip__badge" aria-hidden="true">禁</span>
+      <span class="chip__lbl">{{ c === null ? t('picker.empty') : c }}</span>
+      <span v-if="isChipConstraintMuted(c)" class="chip__badge" aria-hidden="true">
+        <svg class="chip__badge-svg" viewBox="0 0 16 16" width="18" height="18" focusable="false">
+          <circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <line
+            x1="4.25"
+            y1="11.75"
+            x2="11.75"
+            y2="4.25"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+      </span>
     </button>
   </div>
 </template>
@@ -72,12 +80,16 @@ defineEmits<{
   min-width: 2.4rem;
   padding: 0.35rem 0.55rem;
   border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--hairline-strong, rgba(0, 0, 0, 0.14));
   cursor: pointer;
   font-size: 0.8rem;
   font-weight: 650;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
-  transition: transform 0.1s;
+  box-shadow: inset 0 0 0 1px var(--chip-inset, rgba(255, 255, 255, 0.2));
+  transition:
+    transform 0.1s,
+    color 0.45s ease,
+    border-color 0.45s ease,
+    box-shadow 0.45s ease;
 }
 
 .chip:hover {
@@ -85,7 +97,7 @@ defineEmits<{
 }
 
 .chip--empty {
-  border-color: rgba(0, 0, 0, 0.22);
+  border-color: var(--hairline-strong, rgba(0, 0, 0, 0.14));
 }
 
 .chip--constraint-muted {
@@ -104,16 +116,18 @@ defineEmits<{
 
 .chip__badge {
   position: absolute;
-  top: -0.28rem;
-  right: -0.28rem;
-  font-size: 0.58rem;
-  font-weight: 700;
-  line-height: 1;
-  padding: 0.12rem 0.2rem;
-  border-radius: 4px;
-  background: #52525b;
-  color: #fafafa;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  top: -0.32rem;
+  right: -0.32rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  color: #dc2626;
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.85));
   pointer-events: none;
+}
+
+.chip__badge-svg {
+  display: block;
 }
 </style>

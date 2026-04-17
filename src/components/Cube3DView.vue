@@ -34,6 +34,10 @@ const props = defineProps<{
   semiTransparent?: boolean;
   /** 半透明开启时贴纸面与黑框的不透明度（0–1），默认与原先贴纸一致 */
   stickerOpacity?: number;
+  /** 与 App 夜间模式同步：冷调、低对比环境光 */
+  darkScene?: boolean;
+  /** 无障碍说明（由 App i18n 传入） */
+  viewAriaLabel?: string;
 }>();
 
 function clamp01(n: number): number {
@@ -72,6 +76,72 @@ let borderFlashMaterial: THREE.MeshBasicMaterial | null = null;
 let selectionShellMaterial: THREE.MeshBasicMaterial | null = null;
 
 let disposeThree: (() => void) | null = null;
+
+type LightingRig = {
+  ambient: THREE.AmbientLight;
+  hemi: THREE.HemisphereLight;
+  key: THREE.DirectionalLight;
+  fill: THREE.DirectionalLight;
+  rim: THREE.DirectionalLight;
+};
+let lightingRig: LightingRig | null = null;
+
+/**
+ * 相机局部方向（Y 上、-Z 朝「屏前」即看向场景深处）。
+ * 第三分量更负 = 光源更偏向屏幕正前方（与视线同向一侧）。
+ */
+const KEY_DIR_LOCAL = new THREE.Vector3(0.42, 0.7, 0.08).normalize();
+const FILL_DIR_LOCAL = new THREE.Vector3(-0.58, 0.22, 0.08).normalize();
+const RIM_DIR_LOCAL = new THREE.Vector3(0.08, -0.7, 0.02).normalize();
+const DIR_LIGHT_DIST = 18;
+const tmpLightDir = new THREE.Vector3();
+
+/** 平行光随镜头旋转：光源在「相对镜头」的固定方位，照射关系在画面上保持稳定 */
+function updateCameraRelativeDirLights() {
+  if (!camera || !lightingRig) return;
+  const L = lightingRig;
+  const place = (light: THREE.DirectionalLight, localDir: THREE.Vector3) => {
+    tmpLightDir.copy(localDir).applyQuaternion(camera!.quaternion);
+    light.position.copy(tmpLightDir.multiplyScalar(DIR_LIGHT_DIST));
+  };
+  place(L.key, KEY_DIR_LOCAL);
+  place(L.fill, FILL_DIR_LOCAL);
+  place(L.rim, RIM_DIR_LOCAL);
+}
+
+function applySceneLighting(dark: boolean) {
+  if (!lightingRig || !renderer) return;
+  const L = lightingRig;
+  if (!dark) {
+    L.ambient.color.setHex(0xffffff);
+    L.ambient.intensity = 0.36;
+    L.hemi.color.setHex(0xffffff);
+    L.hemi.groundColor.setHex(0xb6c0d0);
+    L.hemi.intensity = 0.64;
+    L.key.color.setHex(0xfff4e8);
+    L.key.intensity = 1.42;
+    L.fill.color.setHex(0xe4ecfc);
+    L.fill.intensity = 0.56;
+    L.rim.color.setHex(0xffead8);
+    L.rim.intensity = 0.44;
+    renderer.toneMappingExposure = 1.08;
+  } else {
+    /** 夜间仅略暗于日间，避免魔方发灰 */
+    L.ambient.color.setHex(0xc5ccd8);
+    L.ambient.intensity = 0.34;
+    L.hemi.color.setHex(0xa8b4c8);
+    L.hemi.groundColor.setHex(0x2a3038);
+    L.hemi.intensity = 0.58;
+    L.key.color.setHex(0xf2f5fc);
+    L.key.intensity = 1.22;
+    L.fill.color.setHex(0x8a9cb0);
+    L.fill.intensity = 0.48;
+    L.rim.color.setHex(0xffdcc8);
+    L.rim.intensity = 0.38;
+    renderer.toneMappingExposure = 1.02;
+  }
+  updateCameraRelativeDirLights();
+}
 
 const half = STICKER_SIZE / 2;
 const frameT = Math.max(0.02, STICKER_SIZE * 0.042);
@@ -184,7 +254,8 @@ function applyStickerAppearance(globalIdx: number) {
     mat.needsUpdate = true;
   }
   mat.opacity = semi ? alpha : 1;
-  mat.depthWrite = !semi;
+  /** 半透明时仍写深度，供选中天蓝壳与缝内黑框做深度比较；否则贴纸不写深度时壳易被整片剔除 */
+  mat.depthWrite = true;
 
   const br = borderRoots[globalIdx];
   if (br) {
@@ -216,7 +287,7 @@ function syncAuxiliaryMaterials() {
       stickerBlackFrameMaterial.needsUpdate = true;
     }
     stickerBlackFrameMaterial.opacity = alpha;
-    /** 缝内黑线始终写深度：半透明贴纸不写深度时，若此处也不写会被错误地「盖没」；写深度后仍可被更近的面正确遮挡 */
+    /** 缝内黑线始终写深度，与贴纸面片同写深度时仍保持缝线在正确层级 */
     stickerBlackFrameMaterial.depthWrite = true;
   }
 }
@@ -474,6 +545,7 @@ function buildCube(root: THREE.Group) {
         cell.rotation.copy(euler);
 
         mesh.renderOrder = 1;
+        shell.renderOrder = 2;
 
         root.add(cell);
         stickerMeshes[g] = mesh;
@@ -593,7 +665,8 @@ onMounted(() => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(w, h);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.08;
   el.appendChild(renderer.domElement);
 
   controls = new TrackballControls(camera, renderer.domElement);
@@ -605,20 +678,23 @@ onMounted(() => {
   controls.target.set(0, 0, 0);
   controls.handleResize();
 
-  scene.add(new THREE.AmbientLight(0xffffff, 1.05));
-  scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c0d0, 0.55));
+  const ambient = new THREE.AmbientLight(0xffffff, 0.36);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0xb6c0d0, 0.64);
+  const key = new THREE.DirectionalLight(0xfff4e8, 1.42);
+  key.position.set(5.4, 8.4, 6.2);
+  key.castShadow = false;
+  const fill = new THREE.DirectionalLight(0xe4ecfc, 0.56);
+  fill.position.set(-4.3, 2.2, -3.4);
+  const rim = new THREE.DirectionalLight(0xffead8, 0.44);
+  rim.position.set(-1.2, -4.4, 5.6);
 
-  const key = new THREE.DirectionalLight(0xffffff, 1.15);
-  key.position.set(5, 8, 6);
-  scene.add(key);
-
-  const fill = new THREE.DirectionalLight(0xf8f9ff, 0.55);
-  fill.position.set(-4, 2, -3);
-  scene.add(fill);
-
-  const rim = new THREE.DirectionalLight(0xffeedd, 0.35);
-  rim.position.set(0, -4, 5);
-  scene.add(rim);
+  scene.add(ambient, hemi, key, fill, rim);
+  scene.add(key.target, fill.target, rim.target);
+  key.target.position.set(0, 0, 0);
+  fill.target.position.set(0, 0, 0);
+  rim.target.position.set(0, 0, 0);
+  lightingRig = { ambient, hemi, key, fill, rim };
+  applySceneLighting(props.darkScene === true);
 
   cubeRoot = new THREE.Group();
   cubeRoot.renderOrder = 0;
@@ -685,6 +761,7 @@ onMounted(() => {
   function tick() {
     raf = requestAnimationFrame(tick);
     controls?.update();
+    updateCameraRelativeDirLights();
 
     if (borderFlashMaterial) {
       if (props.highlightIndices.size > 0) {
@@ -740,6 +817,7 @@ onMounted(() => {
     if (renderer?.domElement.parentElement === el) {
       el.removeChild(renderer.domElement);
     }
+    lightingRig = null;
     renderer = null;
     scene = null;
     camera = null;
@@ -780,6 +858,13 @@ watch(
     syncAllStickers();
   },
 );
+
+watch(
+  () => props.darkScene,
+  (dark) => {
+    applySceneLighting(dark === true);
+  },
+);
 </script>
 
 <template>
@@ -787,7 +872,7 @@ watch(
     ref="containerRef"
     class="cube-3d"
     role="img"
-    aria-label="三阶魔方三维视图，拖拽旋转视角，点击贴纸换色"
+    :aria-label="viewAriaLabel ?? '3×3 cube'"
   />
 </template>
 
