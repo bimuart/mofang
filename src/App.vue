@@ -1435,63 +1435,67 @@ function applySelectedParityIncompleteEnumeration() {
           :class="{ 'solver-strip--visible': solverStripVisible }"
           :aria-hidden="!solverStripVisible"
         >
-          <p v-if="solverError" class="solver-err solver-err--in-strip">{{ solverError }}</p>
-          <template v-else-if="solutionMoves.length > 0">
-            <div class="solver-strip__panel">
-              <div class="solver-strip__body">
-                <p class="solver-info__lead">
-                  <template v-if="solutionIsReverse">
-                    {{ t('solver.lead.reverse', { cur: solutionStepIndex, total: solutionMoves.length }) }}
-                  </template>
-                  <template v-else>
-                    {{ t('solver.lead.forward', { cur: solutionStepIndex, total: solutionMoves.length }) }}
-                  </template>
-                </p>
-                <ol
-                  class="solver-steps"
-                  :aria-label="solutionIsReverse ? t('solver.stepsAriaReverse') : t('solver.stepsAriaForward')"
-                >
-                  <li
-                    v-for="(m, i) in solutionMoves"
-                    :key="`${i}-${m}`"
-                    class="solver-steps__item"
-                    :class="{
-                      'solver-steps__item--done':
-                        solutionIsReverse
-                          ? !reverseAwaitingFirstNext && i < solutionStepIndex
-                          : i < solutionStepIndex,
-                      'solver-steps__item--current':
-                        solutionIsReverse
-                          ? !reverseAwaitingFirstNext &&
-                            i === solutionStepIndex &&
-                            solutionStepIndex < solutionMoves.length
-                          : i === solutionStepIndex,
-                      'solver-steps__item--pending':
-                        solutionIsReverse
-                          ? reverseAwaitingFirstNext ||
-                            i > solutionStepIndex ||
-                            (i === solutionStepIndex && solutionStepIndex >= solutionMoves.length)
-                          : i > solutionStepIndex,
-                    }"
-                  >
-                    <span class="solver-steps__move">{{ m }}</span>
-                  </li>
-                </ol>
-              </div>
-              <div class="solver-strip__footer">
-                <button
-                  type="button"
-                  class="toolbar__btn-sm solver-next-btn"
-                  :disabled="!canAdvanceSolutionStep || solverLoading || solutionAnimating"
-                  @click="nextSolutionStep"
-                >
-                  {{ t('solver.next') }}
-                </button>
-              </div>
+          <Transition name="solver-strip-t">
+            <div v-if="solverStripVisible" class="solver-strip__content" key="solver-strip-body">
+              <p v-if="solverError" class="solver-err solver-err--in-strip">{{ solverError }}</p>
+              <template v-else-if="solutionMoves.length > 0">
+                <div class="solver-strip__panel">
+                  <div class="solver-strip__body">
+                    <p class="solver-info__lead">
+                      <template v-if="solutionIsReverse">
+                        {{ t('solver.lead.reverse', { cur: solutionStepIndex, total: solutionMoves.length }) }}
+                      </template>
+                      <template v-else>
+                        {{ t('solver.lead.forward', { cur: solutionStepIndex, total: solutionMoves.length }) }}
+                      </template>
+                    </p>
+                    <ol
+                      class="solver-steps"
+                      :aria-label="solutionIsReverse ? t('solver.stepsAriaReverse') : t('solver.stepsAriaForward')"
+                    >
+                      <li
+                        v-for="(m, i) in solutionMoves"
+                        :key="`${i}-${m}`"
+                        class="solver-steps__item"
+                        :class="{
+                          'solver-steps__item--done':
+                            solutionIsReverse
+                              ? !reverseAwaitingFirstNext && i < solutionStepIndex
+                              : i < solutionStepIndex,
+                          'solver-steps__item--current':
+                            solutionIsReverse
+                              ? !reverseAwaitingFirstNext &&
+                                i === solutionStepIndex &&
+                                solutionStepIndex < solutionMoves.length
+                              : i === solutionStepIndex,
+                          'solver-steps__item--pending':
+                            solutionIsReverse
+                              ? reverseAwaitingFirstNext ||
+                                i > solutionStepIndex ||
+                                (i === solutionStepIndex && solutionStepIndex >= solutionMoves.length)
+                              : i > solutionStepIndex,
+                        }"
+                      >
+                        <span class="solver-steps__move">{{ m }}</span>
+                      </li>
+                    </ol>
+                  </div>
+                  <div class="solver-strip__footer">
+                    <button
+                      type="button"
+                      class="toolbar__btn-sm solver-next-btn"
+                      :disabled="!canAdvanceSolutionStep || solverLoading || solutionAnimating"
+                      @click="nextSolutionStep"
+                    >
+                      {{ t('solver.next') }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+              <p v-else-if="solverBanner" class="solver-banner solver-banner--in-strip">{{ solverBanner }}</p>
+              <div v-else class="solver-strip__placeholder" aria-hidden="true" />
             </div>
-          </template>
-          <p v-else-if="solverBanner" class="solver-banner solver-banner--in-strip">{{ solverBanner }}</p>
-          <div v-else class="solver-strip__placeholder" aria-hidden="true" />
+          </Transition>
         </div>
         </div>
     </div>
@@ -2414,15 +2418,40 @@ function applySelectedParityIncompleteEnumeration() {
   cursor: not-allowed;
 }
 
-/** 求解步骤条：无求解结果时隐藏；有步骤/错误/横幅时显示 */
+/** 求解步骤条：有内容时淡入展开，无内容时淡出；移动端预留空位避免整列突然下跳 */
 .solver-strip {
-  display: none;
+  display: block;
+  overflow: hidden;
   font-size: 0.88rem;
   line-height: 1.45;
+  box-sizing: border-box;
 }
 
-.solver-strip--visible {
-  display: block;
+.solver-strip__content {
+  box-sizing: border-box;
+}
+
+.solver-strip-t-enter-active,
+.solver-strip-t-leave-active {
+  transition:
+    opacity 0.32s ease,
+    max-height 0.42s cubic-bezier(0.33, 1, 0.68, 1),
+    transform 0.32s ease;
+  overflow: hidden;
+}
+
+.solver-strip-t-enter-from,
+.solver-strip-t-leave-to {
+  opacity: 0;
+  max-height: 0;
+  transform: translateY(-0.2rem);
+}
+
+.solver-strip-t-enter-to,
+.solver-strip-t-leave-from {
+  opacity: 1;
+  max-height: 80rem;
+  transform: translateY(0);
 }
 
 .solver-strip__placeholder {
@@ -2535,7 +2564,7 @@ function applySelectedParityIncompleteEnumeration() {
    * 用 min(54vh, 22rem) 同时表达「跟屏高成比例」与「再长也别超过约 22 字宽的排版上限」；min 取二者较小值，故只有较小的一侧在「生效」。
    */
   .page {
-    --mobile-cube-stack-gap: min(70vh, 45rem);
+    --mobile-cube-stack-gap: min(50vh, 22rem);
   }
 
   .page-ui {
@@ -2573,6 +2602,19 @@ function applySelectedParityIncompleteEnumeration() {
   .app-io-layer .toolbar__io-block {
     max-height: none;
     overflow-y: visible;
+  }
+
+  /** 步骤行：无内容时仍占一条固定高度，避免下方区域突然下跳；虚线提示可展开区域 */
+  .solver-strip {
+    min-height: 9.6rem;
+  }
+
+  .solver-strip:not(.solver-strip--visible) {
+    border-bottom: 1px dashed var(--hairline);
+  }
+
+  .solver-strip--visible {
+    border-bottom: none;
   }
 
   .facelets54__input-wrap {
