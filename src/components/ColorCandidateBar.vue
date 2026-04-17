@@ -75,6 +75,35 @@ defineEmits<{
   align-items: center;
 }
 
+/** 仅移动端：双列等分；chip 撑满格宽，避免格内右侧空一截像「底板右宽」 */
+@media (max-width: 900px) {
+  .bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: auto;
+    column-gap: 0.5rem;
+    row-gap: 0.4rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: calc(2 * 2.75rem + 0.5rem);
+    justify-items: stretch;
+    align-items: stretch;
+    box-sizing: border-box;
+  }
+
+  .chip {
+    display: inline-flex;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    justify-self: stretch;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    text-align: center;
+  }
+}
+
 .chip {
   position: relative;
   min-width: 2.4rem;

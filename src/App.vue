@@ -52,7 +52,7 @@ const localeHidden = ref(false);
 async function setLocale(next: Locale) {
   if (next === locale.value) return;
   localeHidden.value = true;
-  await new Promise((r) => setTimeout(r, 320));
+  await new Promise((r) => setTimeout(r, 580));
   setLocaleBase(next);
   await nextTick();
   localeHidden.value = false;
@@ -225,11 +225,32 @@ const selectedCell = ref<number | null>(null);
 
 /** 选色面板 `position:fixed` 锚点（最近一次点中贴纸的指针位置） */
 const pickerPointerPos = ref({ x: 0, y: 0 });
+const pickerPanelRef = ref<HTMLElement | null>(null);
 
 const pickerFloatingStyle = computed(() => ({
   left: `${pickerPointerPos.value.x}px`,
   top: `${pickerPointerPos.value.y}px`,
 }));
+
+/** 浮窗选色条贴边后仍可能超出视口，按面板包围盒把锚点平移进可视区域（含 visualViewport） */
+function clampPickerPanelIntoView() {
+  const panel = pickerPanelRef.value;
+  if (!panel || selectedCell.value === null) return;
+  const rect = panel.getBoundingClientRect();
+  const pad = 10;
+  const vv = window.visualViewport;
+  const vw = vv?.width ?? window.innerWidth;
+  const vh = vv?.height ?? window.innerHeight;
+  let dx = 0;
+  let dy = 0;
+  if (rect.left < pad) dx = pad - rect.left;
+  if (rect.right > vw - pad) dx = vw - pad - rect.right;
+  if (rect.top < pad) dy = pad - rect.top;
+  if (rect.bottom > vh - pad) dy = vh - pad - rect.bottom;
+  if (dx === 0 && dy === 0) return;
+  const p = pickerPointerPos.value;
+  pickerPointerPos.value = { x: p.x + dx, y: p.y + dy };
+}
 
 /** 选色条固定六种面色 +「空」；是否可选由 `computeConstraintChainBCandidates` + `validateConstraintChainA` 约束链决定 */
 const pickerBarCandidates = computed((): readonly (FaceId | null)[] => {
@@ -664,7 +685,7 @@ function onConstraintsDrawerBackgroundClick(ev: MouseEvent) {
   selectedUserConstraintId.value = null;
 }
 
-function onStickerClick(globalIdx: number, clientX: number, clientY: number) {
+async function onStickerClick(globalIdx: number, clientX: number, clientY: number) {
   if (LOCKED_CENTER.has(globalIdx)) return;
   if (selectedCell.value === globalIdx) {
     selectedCell.value = null;
@@ -672,11 +693,34 @@ function onStickerClick(globalIdx: number, clientX: number, clientY: number) {
   }
   selectedCell.value = globalIdx;
   pickerPointerPos.value = { x: clientX, y: clientY };
+  await nextTick();
+  requestAnimationFrame(() => {
+    clampPickerPanelIntoView();
+    requestAnimationFrame(() => clampPickerPanelIntoView());
+  });
 }
 
 function onStickerPointerMiss() {
   clearSelection();
 }
+
+watchEffect((onCleanup) => {
+  if (selectedCell.value === null) return;
+  const onViewportChange = () => {
+    requestAnimationFrame(() => {
+      clampPickerPanelIntoView();
+      requestAnimationFrame(() => clampPickerPanelIntoView());
+    });
+  };
+  window.addEventListener('resize', onViewportChange);
+  window.visualViewport?.addEventListener('resize', onViewportChange);
+  window.visualViewport?.addEventListener('scroll', onViewportChange);
+  onCleanup(() => {
+    window.removeEventListener('resize', onViewportChange);
+    window.visualViewport?.removeEventListener('resize', onViewportChange);
+    window.visualViewport?.removeEventListener('scroll', onViewportChange);
+  });
+});
 
 watchEffect((onCleanup) => {
   if (selectedCell.value === null) return;
@@ -1360,7 +1404,8 @@ function applySelectedParityIncompleteEnumeration() {
         </button>
       </div>
     </div>
-    <div class="page-ui-i18n" :class="{ 'page-ui-i18n--hide': localeHidden }">
+    <div class="page-ui__locale-fade" :class="{ 'page-ui__locale-fade--hide': localeHidden }">
+    <div class="page-ui-i18n">
     <!-- 面串输入固定左上宽区；输入框宽度单独限制，「应用」在下一行左对齐 -->
     <div class="app-io-layer">
         <div class="toolbar__io-block">
@@ -1450,6 +1495,7 @@ function applySelectedParityIncompleteEnumeration() {
         </div>
         </div>
     </div>
+    </div>
 
     <div class="app-grid">
       <aside class="toolbar toolbar--left" :aria-label="t('app.aria.toolbar')">
@@ -1508,6 +1554,7 @@ function applySelectedParityIncompleteEnumeration() {
         >
           {{ t('toolbar.undo') }}
         </button>
+        <span class="toolbar__row-break" aria-hidden="true" />
         <button
           type="button"
           class="toolbar__primary"
@@ -1537,26 +1584,28 @@ function applySelectedParityIncompleteEnumeration() {
       <aside class="app-side-column" :aria-label="t('app.aria.side')">
         <section class="header-theme card" :aria-label="t('theme.faceColors')">
           <div class="header-theme__inner">
-            <div class="face-theme face-theme--inline" :aria-label="t('theme.faceSwatches')">
-              <div class="face-theme__row" role="group">
-                <label
-                  v-for="f in FACES"
-                  :key="f"
-                  class="face-theme__swatch"
-                >
-                  <span class="face-theme__tile" :style="{ backgroundColor: faceDisplayColors[f] }" />
-                  <span class="face-theme__lbl">{{ f }}</span>
-                  <input
-                    class="face-theme__color"
-                    type="color"
-                    :value="faceDisplayColors[f]"
-                    @input="setFaceDisplayColor(f, ($event.target as HTMLInputElement).value)"
-                  />
-                </label>
+            <div class="face-theme face-theme--inline">
+              <div class="face-theme__palette" role="group" :aria-label="t('theme.faceSwatches')">
+                <div class="face-theme__swatches">
+                  <label
+                    v-for="f in FACES"
+                    :key="f"
+                    class="face-theme__swatch"
+                  >
+                    <span class="face-theme__tile" :style="{ backgroundColor: faceDisplayColors[f] }" />
+                    <span class="face-theme__lbl">{{ f }}</span>
+                    <input
+                      class="face-theme__color"
+                      type="color"
+                      :value="faceDisplayColors[f]"
+                      @input="setFaceDisplayColor(f, ($event.target as HTMLInputElement).value)"
+                    />
+                  </label>
+                </div>
+                <button type="button" class="toolbar__btn-sm face-theme__reset" @click="resetFaceDisplayColors">
+                  {{ t('theme.reset') }}
+                </button>
               </div>
-              <button type="button" class="toolbar__btn-sm face-theme__reset" @click="resetFaceDisplayColors">
-                {{ t('theme.reset') }}
-              </button>
             </div>
             <label class="semi-opacity">
               <input
@@ -1617,6 +1666,7 @@ function applySelectedParityIncompleteEnumeration() {
         </div>
       </aside>
     </div>
+    </div>
 
     <Transition name="mac-float">
       <div
@@ -1624,7 +1674,7 @@ function applySelectedParityIncompleteEnumeration() {
         class="picker-anchor"
         :style="pickerFloatingStyle"
       >
-        <div class="picker picker--floating card mac-float-surface">
+        <div ref="pickerPanelRef" class="picker picker--floating card mac-float-surface">
           <ColorCandidateBar
             :candidates="pickerBarCandidates"
             :face-colors="faceDisplayColors"
@@ -1776,7 +1826,6 @@ function applySelectedParityIncompleteEnumeration() {
     </section>
     </template>
     </div>
-    </div>
   </div>
 </template>
 
@@ -1901,21 +1950,27 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 /** 勿对含 fixed 子元素的祖先使用 filter，否则 fixed 会相对该层定位导致跳动 */
-.page-ui > .page-ui-i18n {
+.page-ui > .page-ui__locale-fade {
   pointer-events: none;
-  transition: opacity 0.35s ease;
+  /** 去掉 --hide 后由 0→1 淡入，时长主要调这里 */
+  transition: opacity 1.15s ease;
 }
 
-.page-ui-i18n > * {
+.page-ui > .page-ui__locale-fade.page-ui__locale-fade--hide {
+  /** 加上 --hide 后由 1→0 淡出，可与淡入不同 */
+  transition: opacity 0.55s ease;
+}
+
+.page-ui__locale-fade > * {
   pointer-events: auto;
 }
 
-.page-ui-i18n--hide {
+.page-ui__locale-fade--hide {
   opacity: 0;
   pointer-events: none;
 }
 
-.page-ui-i18n--hide > * {
+.page-ui__locale-fade--hide > * {
   pointer-events: none;
 }
 
@@ -2116,6 +2171,11 @@ function applySelectedParityIncompleteEnumeration() {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+}
+
+/** 桌面隐藏；移动端 flex 内占满一行以强制换行（前 4 钮 / 后 3 钮） */
+.toolbar__row-break {
+  display: none;
 }
 
 .toolbar--left {
@@ -2469,6 +2529,37 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 @media (max-width: 900px) {
+  /** 纵向：主题/语言 → 面串+应用+步骤 →（固定魔方可视区）→ 七钮 → 选色+重置 → 约束；cube 仍在 .page 下，用下边距为魔方留白；仅用 vh/rem，不用 vmin，避免随屏宽变化 */
+  /**
+   * vh：1vh = 视口高度的 1%（仅随窗口高度变，与屏宽无直接关系）。rem：1rem = 根元素 html 的 font-size（常见默认 16px），与视口无固定换算，随用户/站点根字号而变。
+   * 用 min(54vh, 22rem) 同时表达「跟屏高成比例」与「再长也别超过约 22 字宽的排版上限」；min 取二者较小值，故只有较小的一侧在「生效」。
+   */
+  .page {
+    --mobile-cube-stack-gap: min(70vh, 45rem);
+  }
+
+  .page-ui {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding-top: 0.75rem;
+  }
+
+  .app-chrome {
+    position: static;
+    align-self: flex-end;
+    margin: 0 0 0.55rem;
+  }
+
+  .page-ui-i18n {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.55rem;
+    width: 100%;
+    margin-bottom: var(--mobile-cube-stack-gap);
+  }
+
   .app-io-layer {
     position: static;
     left: auto;
@@ -2476,12 +2567,17 @@ function applySelectedParityIncompleteEnumeration() {
     z-index: auto;
     width: 100%;
     max-width: none;
-    margin-bottom: 0.65rem;
+    margin-bottom: 0;
   }
 
   .app-io-layer .toolbar__io-block {
     max-height: none;
     overflow-y: visible;
+  }
+
+  .facelets54__input-wrap {
+    width: 100%;
+    max-width: 100%;
   }
 
   .app-grid {
@@ -2492,12 +2588,50 @@ function applySelectedParityIncompleteEnumeration() {
   .toolbar--left {
     position: static;
     max-height: none;
-    flex-direction: column;
-    flex-wrap: nowrap;
-    align-items: stretch;
-    max-width: none;
     width: 100%;
+    max-width: none;
     margin-top: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: flex-start;
+    align-content: flex-start;
+    gap: 0.45rem;
+    box-sizing: border-box;
+  }
+
+  /** 两行各自从左依次排，不做跨行列对齐（与 grid 四列不同） */
+  .toolbar--left > button,
+  .toolbar--left > .toolbar__random-wrap {
+    flex: 0 0 auto;
+    width: max-content;
+    max-width: none;
+    min-width: 0;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
+  .toolbar--left .toolbar__row-break {
+    display: block;
+    flex-basis: 100%;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    border: none;
+    align-self: stretch;
+  }
+
+  .toolbar--left .toolbar__random-wrap {
+    width: max-content;
+  }
+
+  .toolbar--left .toolbar__random-wrap > .toolbar__primary {
+    width: max-content;
+    min-width: 0;
+    max-width: none;
   }
 
   .app-side-column {
@@ -2506,6 +2640,39 @@ function applySelectedParityIncompleteEnumeration() {
     overflow: visible;
     max-width: none;
     width: 100%;
+    padding-top: 0.35rem;
+  }
+
+  /**
+   * 六格条：固定约宽 + 足够 min-height，避免 overflow-x 滚动条挤占高度出现「条/滑块」；
+   * 横向滚动条在触控上仍可用，仅弱化显示（scrollbar-width / webkit）
+   */
+  .face-theme.face-theme--inline .face-theme__swatches {
+    flex: 0 1 auto;
+    width: 11.55rem;
+    max-width: calc(100% - 4.75rem);
+    min-width: 0;
+    min-height: 2.85rem;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .face-theme.face-theme--inline .face-theme__swatches::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
+  /** 浮窗：逻辑四边等距，避免与桌面 0.55/0.65 混用造成左右视觉差 */
+  .picker.picker--floating.card.mac-float-surface {
+    padding-block: 0.5rem;
+    padding-inline: 0.5rem;
+    transform: translate(0.5rem, -0.5rem) translateY(-100%);
+  }
+
+  .picker--floating {
+    width: max-content;
+    min-width: calc(2 * 2.75rem + 0.5rem + 1rem);
+    max-width: min(96vw, 22rem);
   }
 }
 
@@ -3049,40 +3216,36 @@ function applySelectedParityIncompleteEnumeration() {
   color: #a8281e;
 }
 
-.face-theme {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.45rem;
-  padding-top: 0.1rem;
-}
-
-/** 须写在 .face-theme 之后，否则 flex-direction:column 会盖掉横排 */
+/** 侧栏六面 + 重置：一行 flex，仅色块区横向滚动，重置不被 overflow 裁切 */
 .face-theme.face-theme--inline {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
+  flex: 0 0 auto;
   width: 100%;
   max-width: 100%;
-  box-sizing: border-box;
-  gap: 0.35rem 0.5rem;
-}
-
-.face-theme.face-theme--inline .face-theme__row {
-  flex: 1 1 auto;
   min-width: 0;
-  justify-content: flex-start;
+  box-sizing: border-box;
 }
 
-.face-theme__row {
+.face-theme__palette {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: center;
+  align-items: flex-start;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.face-theme__swatches {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: flex-start;
   gap: 0.22rem;
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 
 .face-theme__swatch {
@@ -3130,8 +3293,11 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 .face-theme__reset {
+  flex: 0 0 auto;
   flex-shrink: 0;
   margin: 0;
+  align-self: flex-start;
+  white-space: nowrap;
   /** 勿用 font:inherit，否则会盖掉 .toolbar__btn-sm 的 0.78rem，与「应用」不一致 */
 }
 </style>

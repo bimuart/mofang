@@ -1,9 +1,9 @@
 3x3 Rubik's Cube Constraint Validation Steps
-├── Edge Piece Positioning
+├── Edge Permutation
 │   ├── Take edge pieces with 2 filled stickers; if the color combination does not exist in the 12 standard edge color sets -> Fail
 │   ├── If the count of a specific filled edge combination exceeds the number available in the 12 standard sets -> Fail
 │   └── Otherwise -> Pass
-├── Corner Piece Positioning
+├── Corner Permutation
 │   ├── Take corner pieces with 2 or 3 filled stickers; if the color combination does not exist in the 8 standard corner color sets -> Fail
 │   ├── If the count of filled corner pieces exceeds the number available in the 8 standard sets -> Fail
 │   └── Otherwise -> Pass
