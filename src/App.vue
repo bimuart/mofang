@@ -2851,6 +2851,7 @@ function applySelectedParityIncompleteEnumeration() {
     backdrop-filter: none;
     box-shadow: none;
     cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
 
   .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range {
@@ -2861,11 +2862,33 @@ function applySelectedParityIncompleteEnumeration() {
     margin: 0;
     padding: 0;
     vertical-align: middle;
+    -webkit-tap-highlight-color: transparent;
   }
 
-  /** 与 `.semi-opacity__range::-webkit-slider-thumb` 相同，对齐 3px 轨道垂直中心 */
+  /** 顶栏移动端：圆钮略大于默认 12px，仍与 3px 轨道垂直居中对齐 */
   .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range::-webkit-slider-thumb {
-    margin-top: -4.5px;
+    width: 15px;
+    height: 15px;
+    margin-top: -6px;
+  }
+
+  .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range::-moz-range-thumb {
+    width: 15px;
+    height: 15px;
+  }
+
+  /**
+   * 顶栏轨较窄：全局渐变用 pct-6px 避免叠在圆钮下发暗，但在低百分比时 6px 大于位移，染色条与圆钮脱节。
+   * 仅顶栏移动端 WebKit：填充端与取值百分比对齐。
+   */
+  .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range::-webkit-slider-runnable-track {
+    background: linear-gradient(
+      to right,
+      var(--semi-opacity-fill) 0,
+      var(--semi-opacity-fill) var(--semi-opacity-pct),
+      var(--semi-opacity-track) var(--semi-opacity-pct),
+      var(--semi-opacity-track) 100%
+    );
   }
 
   .page-ui-i18n {
