@@ -958,6 +958,46 @@ function syncIsMobileLayout() {
   isMobileLayout.value = window.matchMedia('(max-width: 900px)').matches;
 }
 
+/** 移动端：页面向下滚动（手指上滑）时魔方区渐显幕布，减轻卡片滑过魔方时的视觉穿透 */
+const MOBILE_CUBE_SCROLL_VEIL_FADE_PX = 400;
+const cubeScrollVeilOpacity = ref(0);
+let cubeVeilScrollRaf: number | null = null;
+function updateCubeScrollVeilOpacity() {
+  if (typeof window === 'undefined' || !isMobileLayout.value) {
+    cubeScrollVeilOpacity.value = 0;
+    return;
+  }
+  const y = Math.max(0, window.scrollY || document.documentElement.scrollTop);
+  cubeScrollVeilOpacity.value = Math.min(1, y / MOBILE_CUBE_SCROLL_VEIL_FADE_PX);
+}
+function scheduleCubeScrollVeilUpdate() {
+  if (typeof window === 'undefined') return;
+  if (cubeVeilScrollRaf != null) return;
+  cubeVeilScrollRaf = requestAnimationFrame(() => {
+    cubeVeilScrollRaf = null;
+    updateCubeScrollVeilOpacity();
+  });
+}
+
+watchEffect((onCleanup) => {
+  if (typeof window === 'undefined') return;
+  if (!isMobileLayout.value) {
+    cubeScrollVeilOpacity.value = 0;
+    return;
+  }
+  const opts: AddEventListenerOptions = { passive: true };
+  window.addEventListener('scroll', scheduleCubeScrollVeilUpdate, opts);
+  updateCubeScrollVeilOpacity();
+  onCleanup(() => {
+    window.removeEventListener('scroll', scheduleCubeScrollVeilUpdate, opts);
+    if (cubeVeilScrollRaf != null) {
+      cancelAnimationFrame(cubeVeilScrollRaf);
+      cubeVeilScrollRaf = null;
+    }
+    cubeScrollVeilOpacity.value = 0;
+  });
+});
+
 onMounted(() => {
   prewarmSolverWhenIdle();
   syncIsMobileLayout();
@@ -1339,6 +1379,12 @@ function applySelectedParityIncompleteEnumeration() {
 <template>
   <div class="page">
     <div class="page-cube-layer">
+      <div
+        v-if="isMobileLayout"
+        class="page-cube-scroll-veil"
+        :style="{ opacity: cubeScrollVeilOpacity }"
+        aria-hidden="true"
+      />
       <section class="view-3d view-3d--fullscreen">
         <Cube3DView
           ref="cube3dRef"
@@ -1980,6 +2026,16 @@ function applySelectedParityIncompleteEnumeration() {
 .page-cube-layer > * {
   position: relative;
   z-index: 1;
+}
+
+/** 仅窄屏挂载：叠在 3D 与伪元素背景之上，opacity 由 window 纵向滚动驱动 */
+.page-cube-layer > .page-cube-scroll-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--cube-scroll-veil);
+  will-change: opacity;
 }
 
 .view-3d--fullscreen {
@@ -3480,6 +3536,8 @@ body {
 
 html[data-theme='light'] {
   color-scheme: light;
+  /** 移动端滚动幕布，与浅色魔方底接近 */
+  --cube-scroll-veil: rgba(252, 246, 236, 0.85);
   --ui-text: #1a1a1a;
   --ui-muted: rgba(75, 78, 90, 0.95);
   --hairline: rgba(0, 0, 0, 0.09);
@@ -3503,6 +3561,7 @@ html[data-theme='light'] {
 
 html[data-theme='dark'] {
   color-scheme: dark;
+  --cube-scroll-veil: rgba(6, 8, 12, 0.7);
   --ui-text: #e8eaed;
   --ui-muted: rgba(203, 213, 225, 0.88);
   --hairline: rgba(255, 255, 255, 0.1);
