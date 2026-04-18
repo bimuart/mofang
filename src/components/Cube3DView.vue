@@ -688,6 +688,8 @@ onMounted(() => {
   controls.rotateSpeed = 2.3;
   controls.staticMoving = false;
   controls.dynamicDampingFactor = 0.08;
+  /** 移动端双指仅缩放/旋转，避免手势中点漂移导致 target 偏移 */
+  controls.noPan = narrow;
   controls.minDistance = 2.8;
   controls.maxDistance = 14;
   controls.target.set(0, 0, 0);

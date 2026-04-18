@@ -2688,6 +2688,14 @@ function applySelectedParityIncompleteEnumeration() {
 }
 
 @media (max-width: 900px) {
+  /**
+   * 3D 区整体上移：`translateY(-min(...))` 在部分浏览器会整句无效，须用 calc。
+   * 仅窄屏生效，PC 不变。
+   */
+  .page-cube-layer :deep(.cube-3d) {
+    transform: translateY(calc(-1 * min(55px, 6.5vh)));
+  }
+
   /** 纵向：主题/语言 → 面串+应用+步骤 →（固定魔方可视区）→ 七钮 → 选色+重置 → 约束；cube 仍在 .page 下，用下边距为魔方留白；仅用 vh/rem，不用 vmin，避免随屏宽变化 */
   /**
    * vh：1vh = 视口高度的 1%（仅随窗口高度变，与屏宽无直接关系）。rem：1rem = 根元素 html 的 font-size（常见默认 16px），与视口无固定换算，随用户/站点根字号而变。
