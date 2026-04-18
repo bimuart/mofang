@@ -13,6 +13,15 @@ export const messages: Record<Locale, Record<string, string>> = {
     'app.aria.side': '选色与约束',
     'app.aria.chrome': '显示与语言',
 
+    'splash.aria': '欢迎',
+    'splash.main1': '随心定义魔方配色',
+    'splash.pcMain2': '每一次填充，我们都实时确保它，真实可解',
+    'splash.mMain2': '每一次填充',
+    'splash.mMain3': '我们都实时确保它',
+    'splash.mMain4': '真实可解',
+    'splash.sub': '基于数学约束实时校验',
+    'splash.hint': '点击任意处进入',
+
     'chrome.themeToDark': '切换到夜间模式',
     'chrome.themeToLight': '切换到日间模式',
     'chrome.lang': '界面语言',
@@ -102,6 +111,16 @@ export const messages: Record<Locale, Record<string, string>> = {
     'app.aria.toolbar': 'Actions',
     'app.aria.side': 'Colors & constraints',
     'app.aria.chrome': 'Display & language',
+
+    'splash.aria': 'Welcome',
+    'splash.main1': 'Define cube colors freely',
+    'splash.pcMain2':
+      'Every fill you make, every fill we verify — always solvable',
+    'splash.mMain2': 'Every fill you make',
+    'splash.mMain3': 'Every fill we verify',
+    'splash.mMain4': 'Always solvable',
+    'splash.sub': 'Real-time validation against mathematical constraints',
+    'splash.hint': 'Tap anywhere to continue',
 
     'chrome.themeToDark': 'Switch to dark mode',
     'chrome.themeToLight': 'Switch to light mode',

@@ -47,6 +47,22 @@ const SHOW_DEV_CUBE_ENUM_JSON = false;
 const { isDark, locale, t, toggleColorScheme, setLocale: setLocaleBase } = useAppChrome();
 provide('i18nT', t);
 
+/** 每次进入应用显示；关闭后不写 localStorage，下次进入仍会显示 */
+const splashVisible = ref(true);
+const splashOverlayRef = ref<HTMLDivElement | null>(null);
+
+function dismissSplash() {
+  if (!splashVisible.value) return;
+  splashVisible.value = false;
+}
+
+function onSplashOverlayKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    dismissSplash();
+  }
+}
+
 /** 切换语言：先淡出再更新文案再淡入 */
 const localeHidden = ref(false);
 async function setLocale(next: Locale) {
@@ -1024,6 +1040,11 @@ onMounted(() => {
   syncIsMobileLayout();
   mobileLayoutMql = window.matchMedia('(max-width: 900px)');
   mobileLayoutMql.addEventListener('change', syncIsMobileLayout);
+  void nextTick(() => {
+    void nextTick(() => {
+      if (splashVisible.value) splashOverlayRef.value?.focus();
+    });
+  });
 });
 const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
@@ -1398,6 +1419,41 @@ function applySelectedParityIncompleteEnumeration() {
 </script>
 
 <template>
+  <Teleport to="body">
+    <Transition name="splash-fade">
+      <div
+        v-if="splashVisible"
+        ref="splashOverlayRef"
+        class="splash-overlay"
+        :class="{ 'splash-overlay--dark': isDark, 'splash-overlay--en': locale === 'en' }"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('splash.aria')"
+        tabindex="-1"
+        @click="dismissSplash"
+        @keydown="onSplashOverlayKeydown"
+      >
+        <div class="splash-overlay__inner" :class="{ 'splash-overlay__inner--pc': !isMobileLayout }">
+          <div class="splash-overlay__head">
+            <template v-if="isMobileLayout">
+              <p class="splash-main splash-main--m">{{ t('splash.main1') }}</p>
+              <p class="splash-main splash-main--m">{{ t('splash.mMain2') }}</p>
+              <p class="splash-main splash-main--m">{{ t('splash.mMain3') }}</p>
+              <p class="splash-main splash-main--m">{{ t('splash.mMain4') }}</p>
+            </template>
+            <template v-else>
+              <p class="splash-main splash-main--pc">{{ t('splash.main1') }}</p>
+              <p class="splash-main splash-main--pc">{{ t('splash.pcMain2') }}</p>
+            </template>
+          </div>
+          <div class="splash-overlay__foot">
+            <p class="splash-sub">{{ t('splash.sub') }}</p>
+            <p class="splash-hint">{{ t('splash.hint') }}</p>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
   <div class="page">
     <div class="page-cube-layer">
       <div
@@ -3607,6 +3663,150 @@ function applySelectedParityIncompleteEnumeration() {
   align-self: flex-start;
   white-space: nowrap;
   /** 勿用 font:inherit，否则会盖掉 .toolbar__btn-sm 的 0.78rem，与「应用」不一致 */
+}
+
+/** 首屏欢迎蒙版：Teleport 至 body，仍使用本组件 scoped */
+.splash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: clamp(1rem, 4vw, 2rem);
+  box-sizing: border-box;
+  cursor: pointer;
+  background: rgba(252, 249, 243, 0.82);
+  backdrop-filter: blur(12px) saturate(1.08);
+  -webkit-backdrop-filter: blur(12px) saturate(1.08);
+  color: #17181f;
+  outline: none;
+  /** Teleport 至 body，与 `.page` 使用同一 UI 字体栈 */
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+}
+
+.splash-overlay--dark {
+  background: rgba(10, 12, 18, 0.86);
+  color: #eef1f7;
+}
+
+.splash-overlay__inner {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  min-height: min(92vh, 100dvh);
+  box-sizing: border-box;
+  padding-inline: clamp(0.75rem, 2.5vw, 1.5rem);
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+  text-align: center;
+  pointer-events: none;
+}
+
+/** 主标题区：自顶向下留出约「中上」位置，避免贴顶 */
+.splash-overlay__head {
+  flex: 0 0 auto;
+  margin-top: clamp(2.75rem, 14vh, 8rem);
+}
+
+/** 副标题 + 提示：相对视口偏中下部（略离底边，避免贴底） */
+.splash-overlay__foot {
+  margin-top: auto;
+  margin-bottom: clamp(2.5rem, 10vh, 6.5rem);
+  padding-top: clamp(1.5rem, 4.25vh, 2.75rem);
+}
+
+.splash-main--pc {
+  margin: 0 0 0.72rem;
+  font-size: clamp(2.432rem, 3.76vw, 3.12rem);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.splash-main--pc:nth-of-type(2) {
+  margin-bottom: 1.2rem;
+}
+
+.splash-overlay__inner--pc .splash-sub {
+  white-space: nowrap;
+  font-size: clamp(0.88rem, 1.05vw, 1rem);
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  line-height: 1.5;
+  opacity: 0.7;
+}
+
+/**
+ * 移动主标题：与 PC（.splash-main--pc）同一套字体设定，仅字号不同；
+ * 不设 nowrap，避免窄屏英文单行溢出。
+ */
+.splash-main--m {
+  margin: 0 0 0.72rem;
+  font-size: clamp(1.68rem, 6.56vw, 1.952rem);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  opacity: 0.8;
+}
+
+.splash-main--m:nth-of-type(4) {
+  margin-bottom: 1.2rem;
+}
+
+/** 移动副标题：与 PC 副标题同一字体设定，仅字号不同（不设 nowrap，长英文可换行） */
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-sub {
+  font-size: clamp(0.92rem, 2.6vw, 1.08rem);
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  line-height: 1.5;
+  opacity: 0.7;
+}
+
+.splash-sub {
+  margin: 0 0 0.4rem;
+}
+
+.splash-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 400;
+  opacity: 0.48;
+  letter-spacing: 0.04em;
+}
+
+/**
+ * 英文蒙版：主标题 / 副标题 / hint 字距一律为默认（须放在后面以盖过 .splash-main--* 与 .inner--pc 等上的 em 字距）
+ */
+.splash-overlay--en .splash-main--pc,
+.splash-overlay--en .splash-main--m,
+.splash-overlay--en .splash-hint,
+.splash-overlay--en .splash-sub,
+.splash-overlay--en .splash-overlay__inner--pc .splash-sub,
+.splash-overlay--en .splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-sub {
+  letter-spacing: normal;
+}
+
+.splash-fade-enter-active {
+  transition: opacity 0.38s ease;
+}
+
+.splash-fade-leave-active {
+  transition: opacity 1s ease;
+}
+
+.splash-fade-enter-from,
+.splash-fade-leave-to {
+  opacity: 0;
 }
 </style>
 
