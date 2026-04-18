@@ -1405,25 +1405,25 @@ function applySelectedParityIncompleteEnumeration() {
     </div>
     <div class="page-ui">
     <div class="app-chrome" :aria-label="t('app.aria.chrome')">
-      <label
-        v-if="isMobileLayout"
-        class="semi-opacity semi-opacity--chrome-mobile"
-        :aria-label="t('theme.opacityAria')"
-      >
-        <input
-          v-model.number="transparencyPercent"
-          class="semi-opacity__range"
-          :style="{ '--semi-opacity-pct': `${transparencyPercent}%` }"
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          :aria-valuenow="transparencyPercent"
-        />
-      </label>
       <div class="app-chrome__end">
+        <label
+          v-if="isMobileLayout"
+          class="semi-opacity semi-opacity--chrome-mobile"
+          :aria-label="t('theme.opacityAria')"
+        >
+          <input
+            v-model.number="transparencyPercent"
+            class="semi-opacity__range"
+            :style="{ '--semi-opacity-pct': `${transparencyPercent}%` }"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="transparencyPercent"
+          />
+        </label>
         <button
           type="button"
           class="app-chrome__icon"
@@ -2694,7 +2694,7 @@ function applySelectedParityIncompleteEnumeration() {
    * 用 min(54vh, 22rem) 同时表达「跟屏高成比例」与「再长也别超过约 22 字宽的排版上限」；min 取二者较小值，故只有较小的一侧在「生效」。
    */
   .page {
-    --mobile-cube-stack-gap: min(55vh, 24rem);
+    --mobile-cube-stack-gap: min(50vh, 22rem);
   }
 
   .page-ui {
@@ -2718,14 +2718,15 @@ function applySelectedParityIncompleteEnumeration() {
     margin-left: auto;
   }
 
-  .semi-opacity--chrome-mobile {
+  /** 与主题钮同组靠右，略缩宽度并收紧与夜间模式钮的间距 */
+  .app-chrome__end .semi-opacity--chrome-mobile {
     flex: 0 1 auto;
     min-width: 0;
-    margin: 0;
+    margin: 0 0.12rem 0 0;
   }
 
-  .semi-opacity--chrome-mobile .semi-opacity__range {
-    width: min(12.5rem, 46vw);
+  .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range {
+    width: min(9.25rem, 34vw);
     max-width: 100%;
   }
 

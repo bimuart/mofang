@@ -77,6 +77,10 @@ let selectionShellMaterial: THREE.MeshBasicMaterial | null = null;
 
 let disposeThree: (() => void) | null = null;
 
+/** 与 App.vue 移动端断点一致：首帧相机略拉远，等同默认视角后退一点 */
+const MOBILE_VIEWPORT_MQ = '(max-width: 900px)';
+const MOBILE_INITIAL_CAMERA_PULL = 1.3;
+
 type LightingRig = {
   ambient: THREE.AmbientLight;
   hemi: THREE.HemisphereLight;
@@ -665,7 +669,10 @@ onMounted(() => {
   scene.background = null;
 
   camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 100);
-  camera.position.set(3.4, 2.5, 4.6);
+  const narrow =
+    typeof window !== 'undefined' && window.matchMedia(MOBILE_VIEWPORT_MQ).matches;
+  const pull = narrow ? MOBILE_INITIAL_CAMERA_PULL : 1;
+  camera.position.set(3.4 * pull, 2.5 * pull, 4.6 * pull);
   camera.lookAt(0, 0, 0);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -685,6 +692,7 @@ onMounted(() => {
   controls.maxDistance = 14;
   controls.target.set(0, 0, 0);
   controls.handleResize();
+  controls.update();
 
   const ambient = new THREE.AmbientLight(0xffffff, 0.36);
   const hemi = new THREE.HemisphereLight(0xffffff, 0xb6c0d0, 0.64);

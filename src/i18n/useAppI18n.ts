@@ -11,7 +11,7 @@ function loadStoredTheme(): ColorScheme {
   } catch {
     /* ignore */
   }
-  return 'light';
+  return 'dark';
 }
 
 function loadStoredLocale(): Locale {
@@ -21,7 +21,7 @@ function loadStoredLocale(): Locale {
   } catch {
     /* ignore */
   }
-  return 'zh';
+  return 'en';
 }
 
 function interpolate(
