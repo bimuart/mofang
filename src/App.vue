@@ -919,6 +919,7 @@ watch(
 
 onBeforeUnmount(() => {
   randomBtnResizeObserver.disconnect();
+  mobileLayoutMql?.removeEventListener('change', syncIsMobileLayout);
 });
 
 const solverInitialized = ref(false);
@@ -947,8 +948,21 @@ function prewarmSolverWhenIdle() {
   }
 }
 
+/** 与 @media (max-width: 900px) 一致：窄屏时透明度滑块移到顶栏首行左侧 */
+const isMobileLayout = ref(
+  typeof window !== 'undefined' ? window.matchMedia('(max-width: 900px)').matches : false,
+);
+let mobileLayoutMql: MediaQueryList | null = null;
+function syncIsMobileLayout() {
+  if (typeof window === 'undefined') return;
+  isMobileLayout.value = window.matchMedia('(max-width: 900px)').matches;
+}
+
 onMounted(() => {
   prewarmSolverWhenIdle();
+  syncIsMobileLayout();
+  mobileLayoutMql = window.matchMedia('(max-width: 900px)');
+  mobileLayoutMql.addEventListener('change', syncIsMobileLayout);
 });
 const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
@@ -1345,63 +1359,83 @@ function applySelectedParityIncompleteEnumeration() {
     </div>
     <div class="page-ui">
     <div class="app-chrome" :aria-label="t('app.aria.chrome')">
-      <button
-        type="button"
-        class="app-chrome__icon"
-        :title="isDark ? t('chrome.themeToLight') : t('chrome.themeToDark')"
-        @click="toggleColorScheme"
+      <label
+        v-if="isMobileLayout"
+        class="semi-opacity semi-opacity--chrome-mobile"
+        :aria-label="t('theme.opacityAria')"
       >
-        <span class="app-chrome__icon-inner" aria-hidden="true">
-          <Transition name="chrome-ico" mode="out-in">
-            <svg
-              v-if="!isDark"
-              key="sun"
-              class="app-chrome__svg"
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-            >
-              <circle cx="12" cy="12" r="4.2" fill="currentColor" />
-              <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none">
-                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-              </g>
-            </svg>
-            <svg
-              v-else
-              key="moon"
-              class="app-chrome__svg"
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-            >
-              <defs>
-                <mask id="app-chrome-moon-mask">
-                  <rect width="24" height="24" fill="white" />
-                  <circle cx="16" cy="9" r="7.15" fill="black" />
-                </mask>
-              </defs>
-              <circle cx="13" cy="11" r="7.15" fill="currentColor" mask="url(#app-chrome-moon-mask)" />
-            </svg>
-          </Transition>
-        </span>
-      </button>
-      <div class="app-chrome__lang" role="group" :aria-label="t('chrome.lang')">
+        <input
+          v-model.number="transparencyPercent"
+          class="semi-opacity__range"
+          :style="{ '--semi-opacity-pct': `${transparencyPercent}%` }"
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="transparencyPercent"
+        />
+      </label>
+      <div class="app-chrome__end">
         <button
           type="button"
-          class="app-chrome__lang-btn"
-          :class="{ 'app-chrome__lang-btn--on': locale === 'zh' }"
-          @click="setLocale('zh')"
+          class="app-chrome__icon"
+          :title="isDark ? t('chrome.themeToLight') : t('chrome.themeToDark')"
+          @click="toggleColorScheme"
         >
-          中
+          <span class="app-chrome__icon-inner" aria-hidden="true">
+            <Transition name="chrome-ico" mode="out-in">
+              <svg
+                v-if="!isDark"
+                key="sun"
+                class="app-chrome__svg"
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+              >
+                <circle cx="12" cy="12" r="4.2" fill="currentColor" />
+                <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none">
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                </g>
+              </svg>
+              <svg
+                v-else
+                key="moon"
+                class="app-chrome__svg"
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+              >
+                <defs>
+                  <mask id="app-chrome-moon-mask">
+                    <rect width="24" height="24" fill="white" />
+                    <circle cx="16" cy="9" r="7.15" fill="black" />
+                  </mask>
+                </defs>
+                <circle cx="13" cy="11" r="7.15" fill="currentColor" mask="url(#app-chrome-moon-mask)" />
+              </svg>
+            </Transition>
+          </span>
         </button>
-        <button
-          type="button"
-          class="app-chrome__lang-btn"
-          :class="{ 'app-chrome__lang-btn--on': locale === 'en' }"
-          @click="setLocale('en')"
-        >
-          EN
-        </button>
+        <div class="app-chrome__lang" role="group" :aria-label="t('chrome.lang')">
+          <button
+            type="button"
+            class="app-chrome__lang-btn"
+            :class="{ 'app-chrome__lang-btn--on': locale === 'zh' }"
+            @click="setLocale('zh')"
+          >
+            中
+          </button>
+          <button
+            type="button"
+            class="app-chrome__lang-btn"
+            :class="{ 'app-chrome__lang-btn--on': locale === 'en' }"
+            @click="setLocale('en')"
+          >
+            EN
+          </button>
+        </div>
       </div>
     </div>
     <div class="page-ui__locale-fade" :class="{ 'page-ui__locale-fade--hide': localeHidden }">
@@ -1409,7 +1443,11 @@ function applySelectedParityIncompleteEnumeration() {
     <!-- 面串输入固定左上宽区；输入框宽度单独限制，「应用」在下一行左对齐 -->
     <div class="app-io-layer">
         <div class="toolbar__io-block">
-        <section class="facelets54 card facelets54--corner" aria-label="facelets54">
+        <section
+          v-if="!isMobileLayout"
+          class="facelets54 card facelets54--corner"
+          aria-label="facelets54"
+        >
           <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
           <div class="facelets54__input-row">
             <div class="facelets54__input-wrap">
@@ -1611,7 +1649,7 @@ function applySelectedParityIncompleteEnumeration() {
                 </button>
               </div>
             </div>
-            <label class="semi-opacity">
+            <label v-if="!isMobileLayout" class="semi-opacity">
               <input
                 v-model.number="transparencyPercent"
                 class="semi-opacity__range"
@@ -1626,6 +1664,33 @@ function applySelectedParityIncompleteEnumeration() {
                 :aria-label="t('theme.opacityAria')"
               />
             </label>
+          </div>
+        </section>
+
+        <section
+          v-if="isMobileLayout"
+          class="facelets54 card facelets54--corner facelets54--between-theme-constraints"
+          aria-label="facelets54"
+        >
+          <p v-if="facelets54ApplyError" class="facelets54__err">{{ facelets54ApplyError }}</p>
+          <div class="facelets54__input-row">
+            <div class="facelets54__input-wrap">
+              <textarea
+                ref="facelets54InputRef"
+                v-model="facelets54Draft"
+                class="facelets54__textarea"
+                rows="1"
+                spellcheck="false"
+                wrap="off"
+                :aria-label="t('facelets.label', { n: facelets54CompactLen })"
+              />
+            </div>
+            <div class="facelets54__apply-row">
+              <button type="button" class="toolbar__btn-sm facelets54__apply" @click="applyFacelets54FromInput">
+                {{ t('facelets.apply') }}
+              </button>
+              <span class="facelets54__counter facelets54__counter--beside-apply">{{ t('facelets.counter', { n: facelets54CompactLen }) }}</span>
+            </div>
           </div>
         </section>
 
@@ -1985,9 +2050,18 @@ function applySelectedParityIncompleteEnumeration() {
   right: clamp(0.75rem, 2vw, 1.25rem);
   display: flex;
   flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.45rem;
   pointer-events: auto;
+}
+
+.app-chrome__end {
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.45rem;
 }
 
 .app-chrome__icon {
@@ -2564,7 +2638,7 @@ function applySelectedParityIncompleteEnumeration() {
    * 用 min(54vh, 22rem) 同时表达「跟屏高成比例」与「再长也别超过约 22 字宽的排版上限」；min 取二者较小值，故只有较小的一侧在「生效」。
    */
   .page {
-    --mobile-cube-stack-gap: min(50vh, 22rem);
+    --mobile-cube-stack-gap: min(55vh, 24rem);
   }
 
   .page-ui {
@@ -2576,8 +2650,27 @@ function applySelectedParityIncompleteEnumeration() {
 
   .app-chrome {
     position: static;
-    align-self: flex-end;
+    align-self: stretch;
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+    align-items: center;
     margin: 0 0 0.55rem;
+  }
+
+  .app-chrome__end {
+    margin-left: auto;
+  }
+
+  .semi-opacity--chrome-mobile {
+    flex: 0 1 auto;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .semi-opacity--chrome-mobile .semi-opacity__range {
+    width: min(12.5rem, 46vw);
+    max-width: 100%;
   }
 
   .page-ui-i18n {
@@ -2606,7 +2699,7 @@ function applySelectedParityIncompleteEnumeration() {
 
   /** 步骤行：无内容时仍占一条固定高度，避免下方区域突然下跳；虚线提示可展开区域 */
   .solver-strip {
-    min-height: 9.6rem;
+    min-height: 10rem;
   }
 
   .solver-strip:not(.solver-strip--visible) {
@@ -3183,6 +3276,40 @@ function applySelectedParityIncompleteEnumeration() {
 
 .app-io-layer .facelets54.card {
   margin-top: 0;
+}
+
+/** 移动端：面串块在选色与约束之间，不占侧栏「顶距」以免与 column gap 叠出过大空隙 */
+.app-side-column > .facelets54--between-theme-constraints.card {
+  margin-top: 0;
+  width: 100%;
+  max-width: 100%;
+  align-self: stretch;
+}
+
+.app-side-column > .facelets54--between-theme-constraints .facelets54__apply-row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+  gap: 0.45rem;
+}
+
+.app-side-column > .facelets54--between-theme-constraints .facelets54__apply {
+  flex-shrink: 0;
+}
+
+/** 计数已移到「应用」同行右侧，输入区不再为角标留 padding-right */
+.app-side-column > .facelets54--between-theme-constraints .facelets54__textarea {
+  padding-right: 0.38rem;
+}
+
+.app-side-column > .facelets54--between-theme-constraints .facelets54__counter--beside-apply {
+  position: static;
+  margin-left: auto;
+  line-height: 1.2;
 }
 
 .facelets54__input-row {
