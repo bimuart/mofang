@@ -2694,7 +2694,7 @@ function applySelectedParityIncompleteEnumeration() {
    * 用 min(54vh, 22rem) 同时表达「跟屏高成比例」与「再长也别超过约 22 字宽的排版上限」；min 取二者较小值，故只有较小的一侧在「生效」。
    */
   .page {
-    --mobile-cube-stack-gap: min(50vh, 22rem);
+    --mobile-cube-stack-gap: min(40vh, 18rem);
   }
 
   .page-ui {
