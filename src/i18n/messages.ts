@@ -25,7 +25,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'toolbar.randomMenu': '随机方式',
     'toolbar.clear': '清空',
     'toolbar.undo': '撤销',
-    'toolbar.fillUnique': '填充唯一候选',
+    'toolbar.fillUnique': '填充唯一',
     'toolbar.steps': '步骤',
     'toolbar.reverseSteps': '逆向步骤',
     'toolbar.solverLoading': '正在初始化求解器…',

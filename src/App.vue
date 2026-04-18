@@ -843,7 +843,11 @@ watchEffect((onCleanup) => {
   onCleanup(() => document.removeEventListener('pointerdown', onDoc, true));
 });
 
-/** 「随机」浮层：Teleport + fixed，避免侧栏 overflow 裁切；宽与按钮同；「全部 / 未选」叠在按钮右侧 */
+/**
+ * 「随机」浮层：Teleport + fixed，避免侧栏 overflow 裁切。
+ * 桌面：宽与按钮同，「全部 / 未选」纵向叠在按钮右侧。
+ * 移动端：两钮横向排列，整体居中对齐在「随机」按钮正上方。
+ */
 const randomBtnRef = ref<HTMLButtonElement | null>(null);
 const randomBtnPx = ref({ w: 0, h: 0 });
 const randomBtnRect = ref({ left: 0, top: 0, right: 0, width: 0, height: 0 });
@@ -881,23 +885,40 @@ watch(randomPopoverOpen, (open) => {
 const randomPopoverBoxStyle = computed(() => {
   const { w, h } = randomBtnPx.value;
   const r = randomBtnRect.value;
+  const mobile = isMobileLayout.value;
+  const gapAbove = 6;
   const base = {
     position: 'fixed' as const,
-    left: `${r.right + 4}px`,
-    top: `${r.top + 4}px`,
     boxSizing: 'border-box' as const,
     zIndex: 10000,
   };
   if (w <= 0 || h <= 0) {
     return {
       ...base,
+      left: mobile ? `${r.left + r.width / 2}px` : `${r.right + 4}px`,
+      top: mobile ? `${r.top}px` : `${r.top + 4}px`,
       visibility: 'hidden' as const,
       pointerEvents: 'none' as const,
+    };
+  }
+  if (mobile) {
+    const rowH = Math.max(h - 2, 32);
+    const totalW = 2 * w;
+    const leftPx = r.left + r.width / 2 - totalW / 2;
+    const topPx = r.top - rowH - gapAbove;
+    return {
+      ...base,
+      left: `${leftPx}px`,
+      top: `${topPx}px`,
+      width: `${totalW}px`,
+      height: `${rowH}px`,
     };
   }
   const row = h - 2;
   return {
     ...base,
+    left: `${r.right + 4}px`,
+    top: `${r.top + 4}px`,
     width: `${w}px`,
     height: `${row * 2}px`,
   };
@@ -1603,6 +1624,7 @@ function applySelectedParityIncompleteEnumeration() {
               <div
                 v-if="randomPopoverOpen"
                 class="random-popover mac-float-surface"
+                :class="{ 'random-popover--mobile': isMobileLayout }"
                 :style="randomPopoverBoxStyle"
                 role="menu"
                 :aria-label="t('toolbar.randomMenu')"
@@ -1637,19 +1659,19 @@ function applySelectedParityIncompleteEnumeration() {
         <button
           type="button"
           class="toolbar__primary"
-          :disabled="!canUndo || solutionAnimating"
-          @click="undoFacelets"
+          :disabled="!canFillFaceUniqueConstraint"
+          @click="fillOneFaceUniqueConstraintCandidates"
         >
-          {{ t('toolbar.undo') }}
+          {{ t('toolbar.fillUnique') }}
         </button>
         <span class="toolbar__row-break" aria-hidden="true" />
         <button
           type="button"
           class="toolbar__primary"
-          :disabled="!canFillFaceUniqueConstraint"
-          @click="fillOneFaceUniqueConstraintCandidates"
+          :disabled="!canUndo || solutionAnimating"
+          @click="undoFacelets"
         >
-          {{ t('toolbar.fillUnique') }}
+          {{ t('toolbar.undo') }}
         </button>
         <button
           type="button"
@@ -2450,6 +2472,24 @@ function applySelectedParityIncompleteEnumeration() {
   background: rgba(0, 0, 0, 0.05);
 }
 
+/** 移动端：「全部 / 未选」横向并排，位置由 randomPopoverBoxStyle 置于随机钮正上方 */
+.random-popover--mobile {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.random-popover--mobile .random-popover__rest-wrap {
+  flex: 1 1 0;
+  min-width: 0;
+  border-top: none;
+  border-left: 1px solid var(--hairline);
+}
+
+.random-popover--mobile .random-popover__rest-wrap .random-popover__btn {
+  width: 100%;
+  height: 100%;
+}
+
 .mac-float-surface {
   border: 1px solid var(--hairline);
   background: var(--glass-bg);
@@ -2722,25 +2762,54 @@ function applySelectedParityIncompleteEnumeration() {
     margin: 0 0 0.55rem;
   }
 
+  /** 整行 flex：透明度靠左（约 2ch 边距），主题/语言仍靠右 */
   .app-chrome__end {
-    margin-left: auto;
+    margin-left: 0;
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.45rem;
   }
 
   /**
-   * 与主题钮同组靠右；轨道/滑块视觉与全局一致。
-   * 用 label 的 padding 扩大可点区域，对称负 margin 抵回占位，避免顶栏排版被撑开。
+   * 顶栏透明度：沿用「与主题钮同高」的命中区思路（min-height + 拉高 range），
+   * 外壳全透明、无边，视觉与改前一致；轨道仍 3px，圆钮 margin 与全局 slider 一致以垂直居中。
    */
   .app-chrome__end .semi-opacity--chrome-mobile {
     flex: 0 1 auto;
     min-width: 0;
-    padding: 0.55rem 0.35rem;
-    margin: -0.55rem -0.23rem -0.55rem -0.35rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.25rem;
+    padding: 0 0.5rem;
+    margin: 0 auto 0 2ch;
     box-sizing: border-box;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--ui-text);
+    backdrop-filter: none;
+    box-shadow: none;
+    cursor: pointer;
   }
 
   .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range {
+    box-sizing: border-box;
     width: min(9.25rem, 34vw);
     max-width: 100%;
+    height: 2.25rem;
+    margin: 0;
+    padding: 0;
+    vertical-align: middle;
+  }
+
+  /** 与 `.semi-opacity__range::-webkit-slider-thumb` 相同，对齐 3px 轨道垂直中心 */
+  .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range::-webkit-slider-thumb {
+    margin-top: -4.5px;
   }
 
   .page-ui-i18n {

@@ -14,6 +14,26 @@ function loadStoredTheme(): ColorScheme {
   return 'dark';
 }
 
+/**
+ * 无本地偏好时：按 `navigator.languages` / `navigator.language` 推断。
+ * 仅支持 zh、en；其它语言回退为 en。
+ */
+function defaultLocaleFromNavigator(): Locale {
+  if (typeof navigator === 'undefined') return 'en';
+
+  const list =
+    typeof navigator.languages !== 'undefined' && navigator.languages.length > 0
+      ? navigator.languages
+      : [navigator.language];
+  for (const raw of list) {
+    if (!raw) continue;
+    const lower = raw.toLowerCase();
+    if (lower.startsWith('zh')) return 'zh';
+    if (lower.startsWith('en')) return 'en';
+  }
+  return 'en';
+}
+
 function loadStoredLocale(): Locale {
   try {
     const v = localStorage.getItem(STORAGE_LOCALE);
@@ -21,7 +41,7 @@ function loadStoredLocale(): Locale {
   } catch {
     /* ignore */
   }
-  return 'en';
+  return defaultLocaleFromNavigator();
 }
 
 function interpolate(
