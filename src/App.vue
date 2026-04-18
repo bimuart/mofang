@@ -2718,11 +2718,16 @@ function applySelectedParityIncompleteEnumeration() {
     margin-left: auto;
   }
 
-  /** 与主题钮同组靠右，略缩宽度并收紧与夜间模式钮的间距 */
+  /**
+   * 与主题钮同组靠右；轨道/滑块视觉与全局一致。
+   * 用 label 的 padding 扩大可点区域，对称负 margin 抵回占位，避免顶栏排版被撑开。
+   */
   .app-chrome__end .semi-opacity--chrome-mobile {
     flex: 0 1 auto;
     min-width: 0;
-    margin: 0 0.12rem 0 0;
+    padding: 0.55rem 0.35rem;
+    margin: -0.55rem -0.23rem -0.55rem -0.35rem;
+    box-sizing: border-box;
   }
 
   .app-chrome__end .semi-opacity--chrome-mobile .semi-opacity__range {
