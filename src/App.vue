@@ -959,6 +959,7 @@ onBeforeUnmount(() => {
   mobileLayoutMql?.removeEventListener('change', syncIsMobileLayout);
   window.removeEventListener('keydown', onSolutionAutoplayGlobalKeydown);
   stopSolutionAutoplay();
+  forceReleaseSplashMobileScrollLock();
 });
 
 const solverInitialized = ref(false);
@@ -996,6 +997,53 @@ function syncIsMobileLayout() {
   if (typeof window === 'undefined') return;
   isMobileLayout.value = window.matchMedia('(max-width: 900px)').matches;
 }
+
+/** 移动端蒙版打开时禁止底层页面滚动（iOS 等需在 body 上 fixed 并恢复 scrollY） */
+const SPLASH_MOBILE_SCROLL_LOCK_CLASS = 'splash-mobile-scroll-lock';
+let savedSplashScrollY = 0;
+
+function forceReleaseSplashMobileScrollLock() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  const root = document.documentElement;
+  const { body } = document;
+  if (!root.classList.contains(SPLASH_MOBILE_SCROLL_LOCK_CLASS)) return;
+  root.classList.remove(SPLASH_MOBILE_SCROLL_LOCK_CLASS);
+  body.style.position = '';
+  body.style.top = '';
+  body.style.left = '';
+  body.style.right = '';
+  body.style.width = '';
+  body.style.overflow = '';
+  root.style.overflow = '';
+  window.scrollTo(0, savedSplashScrollY);
+}
+
+function syncSplashMobileScrollLock() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  const root = document.documentElement;
+  const { body } = document;
+  const shouldLock = splashVisible.value && isMobileLayout.value;
+
+  if (shouldLock) {
+    if (!root.classList.contains(SPLASH_MOBILE_SCROLL_LOCK_CLASS)) {
+      savedSplashScrollY = window.scrollY || root.scrollTop || 0;
+      root.classList.add(SPLASH_MOBILE_SCROLL_LOCK_CLASS);
+      body.style.position = 'fixed';
+      body.style.top = `-${savedSplashScrollY}px`;
+      body.style.left = '0';
+      body.style.right = '0';
+      body.style.width = '100%';
+      body.style.overflow = 'hidden';
+      root.style.overflow = 'hidden';
+    }
+  } else if (root.classList.contains(SPLASH_MOBILE_SCROLL_LOCK_CLASS)) {
+    forceReleaseSplashMobileScrollLock();
+  }
+}
+
+watch([splashVisible, isMobileLayout], () => {
+  syncSplashMobileScrollLock();
+}, { immediate: true });
 
 /** 移动端：页面向下滚动（手指上滑）时魔方区渐显幕布，减轻卡片滑过魔方时的视觉穿透 */
 const MOBILE_CUBE_SCROLL_VEIL_FADE_PX = 400;
@@ -3876,6 +3924,12 @@ function applySelectedParityIncompleteEnumeration() {
     sans-serif;
 }
 
+@media (max-width: 900px) {
+  .splash-overlay {
+    touch-action: none;
+  }
+}
+
 .splash-overlay--dark {
   background: rgba(10, 12, 18, 0.86);
   color: #eef1f7;
@@ -4073,6 +4127,13 @@ function applySelectedParityIncompleteEnumeration() {
 html,
 body {
   margin: 0;
+}
+
+/** 移动端欢迎蒙版：禁止 html 链式滚动与橡皮筋回弹 */
+html.splash-mobile-scroll-lock {
+  overflow: hidden;
+  height: 100%;
+  overscroll-behavior: none;
 }
 
 html[data-theme='light'] {
