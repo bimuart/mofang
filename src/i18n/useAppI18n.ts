@@ -4,6 +4,16 @@ import { STORAGE_LOCALE, STORAGE_THEME, messages } from './messages';
 
 export type ColorScheme = 'light' | 'dark';
 
+/** 无本地偏好时，跟随系统/浏览器浅色或深色方案 */
+function defaultThemeFromSystem(): ColorScheme {
+  if (typeof window === 'undefined') return 'light';
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
+}
+
 function loadStoredTheme(): ColorScheme {
   try {
     const v = localStorage.getItem(STORAGE_THEME);
@@ -11,7 +21,7 @@ function loadStoredTheme(): ColorScheme {
   } catch {
     /* ignore */
   }
-  return 'dark';
+  return defaultThemeFromSystem();
 }
 
 /**
