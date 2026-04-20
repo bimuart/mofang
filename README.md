@@ -2,7 +2,7 @@
 
 # 自由魔方
 
-[中文](./README.md) / [English](./README.en.md)
+中文 / [English](./README.en.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Online-brightgreen)](https://bimuart.github.io/cube/)

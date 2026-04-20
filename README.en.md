@@ -2,7 +2,7 @@
 
 # Free Cube
 
-[English](./README.en.md) / [中文](./README.md)
+[中文](./README.md) / English
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Online-brightgreen)](https://bimuart.github.io/cube/)
