@@ -3835,6 +3835,7 @@ function applySelectedParityIncompleteEnumeration() {
 .splash-overlay .splash-main--pc,
 .splash-overlay .splash-main--m,
 .splash-overlay .splash-sub,
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-sub,
 .splash-overlay .splash-hint {
   opacity: 0;
   transform: translateY(12px);
