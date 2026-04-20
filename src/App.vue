@@ -3698,8 +3698,8 @@ function applySelectedParityIncompleteEnumeration() {
 
 /** 首屏欢迎蒙版：Teleport 至 body，仍使用本组件 scoped */
 .splash-overlay {
-  --splash-in-dur: 2080ms;
-  --splash-in-ease: cubic-bezier(0.18, 1, 0.32, 1);
+  --splash-in-dur: 1680ms;
+  --splash-in-ease: cubic-bezier(0.18, 0.5, 0.32, 1);
   position: fixed;
   inset: 0;
   z-index: 100000;
@@ -3845,16 +3845,16 @@ function applySelectedParityIncompleteEnumeration() {
 
 /* PC：主标题第 1 行 -> +240ms 第 2 行 -> +240ms 副标题+hint */
 .splash-overlay__inner--pc .splash-main--pc:nth-of-type(1) {
-  animation-delay: 1000ms;
+  animation-delay: 1400ms;
 }
 
 .splash-overlay__inner--pc .splash-main--pc:nth-of-type(2) {
-  animation-delay: 2240ms;
+  animation-delay: 2640ms;
 }
 
 .splash-overlay__inner--pc .splash-sub,
 .splash-overlay__inner--pc .splash-hint {
-  animation-delay: 3580ms;
+  animation-delay: 3780ms;
 }
 
 /* 移动：主标题第 1 行 -> +240ms 第 2-4 行 -> +240ms 副标题+hint */
