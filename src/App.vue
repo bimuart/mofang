@@ -757,6 +757,7 @@ function applyPick(value: FaceId | null) {
   const arr = facelets.value.split('');
   arr[selectedCell.value] = value === null ? EMPTY_FACELET : value;
   facelets.value = arr.join('');
+  clearSelection();
 }
 
 function clearSelection() {
