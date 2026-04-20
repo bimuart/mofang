@@ -610,7 +610,7 @@ function animateMove(move: string): Promise<void> {
     }
 
     const t0 = performance.now();
-    const duration = 420;
+    const duration = 920;
 
     function frame() {
       if (!pivot.parent || !scene || !cubeRoot) {

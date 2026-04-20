@@ -957,6 +957,8 @@ watch(
 onBeforeUnmount(() => {
   randomBtnResizeObserver.disconnect();
   mobileLayoutMql?.removeEventListener('change', syncIsMobileLayout);
+  window.removeEventListener('keydown', onSolutionAutoplayGlobalKeydown);
+  stopSolutionAutoplay();
 });
 
 const solverInitialized = ref(false);
@@ -1040,6 +1042,7 @@ onMounted(() => {
   syncIsMobileLayout();
   mobileLayoutMql = window.matchMedia('(max-width: 900px)');
   mobileLayoutMql.addEventListener('change', syncIsMobileLayout);
+  window.addEventListener('keydown', onSolutionAutoplayGlobalKeydown);
   void nextTick(() => {
     void nextTick(() => {
       if (splashVisible.value) splashOverlayRef.value?.focus();
@@ -1087,7 +1090,114 @@ const solverStripVisible = computed(
     solutionMoves.value.length > 0,
 );
 
+const SOLUTION_AUTOPLAY_MS = 1000;
+
+const solutionAutoplayPlaying = ref(false);
+let solutionAutoplayTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+function clearSolutionAutoplayTimeout() {
+  if (solutionAutoplayTimeoutId != null) {
+    clearTimeout(solutionAutoplayTimeoutId);
+    solutionAutoplayTimeoutId = null;
+  }
+}
+
+function stopSolutionAutoplay() {
+  solutionAutoplayPlaying.value = false;
+  clearSolutionAutoplayTimeout();
+}
+
+/** 在上一步完成后等待固定间隔再执行下一步（避免 setInterval 与动画重叠导致跳过一拍） */
+function scheduleSolutionAutoplayNextStep() {
+  if (!solutionAutoplayPlaying.value) return;
+  clearSolutionAutoplayTimeout();
+  solutionAutoplayTimeoutId = window.setTimeout(() => {
+    void runSolutionAutoplayScheduledStep();
+  }, SOLUTION_AUTOPLAY_MS);
+}
+
+async function runSolutionAutoplayScheduledStep() {
+  solutionAutoplayTimeoutId = null;
+  if (!solutionAutoplayPlaying.value) return;
+  while (solutionAnimating.value && solutionAutoplayPlaying.value) {
+    await new Promise<void>((r) => {
+      window.setTimeout(r, 20);
+    });
+  }
+  if (!solutionAutoplayPlaying.value) return;
+  if (solverLoading.value) {
+    scheduleSolutionAutoplayNextStep();
+    return;
+  }
+  if (!canAdvanceSolutionStep.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  await nextSolutionStep();
+  if (!solutionAutoplayPlaying.value) return;
+  if (solverError.value != null) {
+    stopSolutionAutoplay();
+    return;
+  }
+  if (!canAdvanceSolutionStep.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  scheduleSolutionAutoplayNextStep();
+}
+
+/** 按下播放：立即执行第一步，再每 SOLUTION_AUTOPLAY_MS 执行后续步 */
+async function startSolutionAutoplayWithImmediateFirstStep() {
+  if (!solutionAutoplayPlaying.value) return;
+  if (solverLoading.value || solutionAnimating.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  if (!canAdvanceSolutionStep.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  await nextSolutionStep();
+  if (!solutionAutoplayPlaying.value) return;
+  if (solverError.value != null) {
+    stopSolutionAutoplay();
+    return;
+  }
+  if (!canAdvanceSolutionStep.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  scheduleSolutionAutoplayNextStep();
+}
+
+function toggleSolutionAutoplay() {
+  if (solutionAutoplayPlaying.value) {
+    stopSolutionAutoplay();
+    return;
+  }
+  if (solverLoading.value || solutionAnimating.value) return;
+  if (!canAdvanceSolutionStep.value) return;
+  solutionAutoplayPlaying.value = true;
+  void startSolutionAutoplayWithImmediateFirstStep();
+}
+
+function onSolutionAutoplayGlobalKeydown(e: KeyboardEvent) {
+  if (isMobileLayout.value) return;
+  if (e.key !== ' ' && e.code !== 'Space') return;
+  const el = e.target as HTMLElement | null;
+  if (el?.closest('input, textarea, [contenteditable="true"], select')) return;
+  if (!solverStripVisible.value) return;
+  if (solutionMoves.value.length === 0 && !solutionAutoplayPlaying.value) return;
+  e.preventDefault();
+  toggleSolutionAutoplay();
+}
+
+watch(solverStripVisible, (visible) => {
+  if (!visible) stopSolutionAutoplay();
+});
+
 function clearSolutionState() {
+  stopSolutionAutoplay();
   solutionMoves.value = [];
   solutionStepIndex.value = 0;
   solverError.value = null;
@@ -1099,6 +1209,7 @@ function clearSolutionState() {
 }
 
 async function fetchSolution() {
+  stopSolutionAutoplay();
   solverError.value = null;
   solverBanner.value = null;
   if (!faceletsComplete.value) {
@@ -1142,6 +1253,7 @@ async function fetchSolution() {
 }
 
 async function fetchReverseSolution() {
+  stopSolutionAutoplay();
   solverError.value = null;
   solverBanner.value = null;
   if (!faceletsComplete.value) {
@@ -1649,6 +1761,29 @@ function applySelectedParityIncompleteEnumeration() {
                       @click="nextSolutionStep"
                     >
                       {{ t('solver.next') }}
+                    </button>
+                    <button
+                      type="button"
+                      class="toolbar__btn-sm solver-autoplay-btn"
+                      :disabled="solverLoading || (!canAdvanceSolutionStep && !solutionAutoplayPlaying)"
+                      :title="!isMobileLayout ? t('solver.autoplaySpaceHint') : undefined"
+                      :aria-pressed="solutionAutoplayPlaying"
+                      :aria-label="t('solver.autoplayAria')"
+                      @click="toggleSolutionAutoplay"
+                    >
+                      <template v-if="!solutionAutoplayPlaying">
+                        <span class="solver-autoplay-btn__text">{{ t('solver.autoplayPlay') }}</span>
+                        <svg class="solver-autoplay-btn__ico" viewBox="0 0 24 24" aria-hidden="true">
+                          <path fill="currentColor" d="M8 5v14l11-7z" />
+                        </svg>
+                      </template>
+                      <template v-else>
+                        <span class="solver-autoplay-btn__text">{{ t('solver.autoplayPause') }}</span>
+                        <svg class="solver-autoplay-btn__ico" viewBox="0 0 24 24" aria-hidden="true">
+                          <rect x="6" y="5" width="4" height="14" fill="currentColor" />
+                          <rect x="14" y="5" width="4" height="14" fill="currentColor" />
+                        </svg>
+                      </template>
                     </button>
                   </div>
                 </div>
@@ -2706,6 +2841,22 @@ function applySelectedParityIncompleteEnumeration() {
   flex-shrink: 0;
 }
 
+.solver-autoplay-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.01rem;
+  padding-right: 0.22rem;
+  padding-left: 0.42rem;
+  flex-shrink: 0;
+}
+
+.solver-autoplay-btn__ico {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex-shrink: 0;
+}
+
 .solver-strip__body {
   flex: 1;
   min-width: min(100%, 18rem);
@@ -2780,7 +2931,7 @@ function applySelectedParityIncompleteEnumeration() {
    * 仅窄屏生效，PC 不变。
    */
   .page-cube-layer :deep(.cube-3d) {
-    transform: translateY(calc(-1 * min(55px, 6.5vh)));
+    transform: translateY(calc(-1 * min(35px, 4.5vh)));
   }
 
   /** 纵向：主题/语言 → 面串+应用+步骤 →（固定魔方可视区）→ 七钮 → 选色+重置 → 约束；cube 仍在 .page 下，用下边距为魔方留白；仅用 vh/rem，不用 vmin，避免随屏宽变化 */

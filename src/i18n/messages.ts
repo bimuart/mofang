@@ -82,6 +82,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     'constraints.parity.intro': '棱块位置交换次数=角块位置交换次数，即同为奇数或偶数。',
 
     'solver.next': '下一步',
+    'solver.autoplayPlay': '播放',
+    'solver.autoplayPause': '暂停',
+    'solver.autoplaySpaceHint': '按空格键播放/暂停',
+    'solver.autoplayAria': '自动按间隔执行下一步',
     'solver.stepsAriaForward': '完整还原步骤序列',
     'solver.stepsAriaReverse': '从还原态到目标态的转动序列',
     'solver.done': '（已完成）',
@@ -184,6 +188,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     'constraints.parity.intro': 'Edge and corner permutation parities match (both odd or both even).',
 
     'solver.next': 'Next',
+    'solver.autoplayPlay': 'Play',
+    'solver.autoplayPause': 'Pause',
+    'solver.autoplaySpaceHint': 'Press Space to play or pause',
+    'solver.autoplayAria': 'Auto-advance solution steps on an interval',
     'solver.stepsAriaForward': 'Full solution move sequence',
     'solver.stepsAriaReverse': 'Moves from solved to target state',
     'solver.done': '(done)',
