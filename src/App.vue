@@ -78,7 +78,7 @@ const MAX_UNDO = 80;
 /** 每次改色 / 载入 / 演示步 之前压入的 54 位串；撤销弹出上一帧（含撤销自动填充） */
 const undoStack = ref<string[]>([]);
 const isUndoing = ref(false);
-const facelets = ref(solvedString());
+const facelets = ref('BRBRURBRBUBUBRBUBULDLDFDLDLFLFLDLFLFDFDFLFDFDRURUBURUR');
 
 /** 与 `facelets` 同步，输入框聚焦时不覆盖正在编辑的内容 */
 const facelets54Draft = ref(facelets.value);
