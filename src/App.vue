@@ -3047,6 +3047,20 @@ function applySelectedParityIncompleteEnumeration() {
     padding-top: 0.75rem;
   }
 
+  /** 移动端版权信息随页面流到最底部（需滚动到底才看到） */
+  .app-credit {
+    position: static;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    z-index: auto;
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    font-size: 0.4rem;
+    margin: 0 0 max(0.42rem, env(safe-area-inset-bottom, 0px));
+  }
+
   .app-chrome {
     position: static;
     align-self: stretch;
