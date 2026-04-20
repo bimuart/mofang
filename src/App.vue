@@ -1597,7 +1597,7 @@ function applySelectedParityIncompleteEnumeration() {
           :aria-hidden="!solverStripVisible"
         >
           <Transition name="solver-strip-t">
-            <div v-if="solverStripVisible" class="solver-strip__content" key="solver-strip-body">
+            <div v-show="solverStripVisible" class="solver-strip__content" key="solver-strip-body">
               <p v-if="solverError" class="solver-err solver-err--in-strip">{{ solverError }}</p>
               <template v-else-if="solutionMoves.length > 0">
                 <div class="solver-strip__panel">
@@ -1654,7 +1654,6 @@ function applySelectedParityIncompleteEnumeration() {
                 </div>
               </template>
               <p v-else-if="solverBanner" class="solver-banner solver-banner--in-strip">{{ solverBanner }}</p>
-              <div v-else class="solver-strip__placeholder" aria-hidden="true" />
             </div>
           </Transition>
         </div>
@@ -2680,14 +2679,6 @@ function applySelectedParityIncompleteEnumeration() {
   transform: translateY(0);
 }
 
-.solver-strip__placeholder {
-  min-height: 3.25rem;
-  border-radius: 0;
-  border: none;
-  border-bottom: 1px dashed var(--hairline);
-  background: transparent;
-}
-
 .solver-strip__panel {
   display: flex;
   flex-direction: column;
@@ -2896,8 +2887,10 @@ function applySelectedParityIncompleteEnumeration() {
     flex-direction: column;
     align-items: stretch;
     gap: 0.55rem;
+    height: 12rem;
     width: 100%;
     margin-bottom: var(--mobile-cube-stack-gap);
+    pointer-events: none;
   }
 
   .app-io-layer {
@@ -2913,19 +2906,34 @@ function applySelectedParityIncompleteEnumeration() {
   .app-io-layer .toolbar__io-block {
     max-height: none;
     overflow-y: visible;
+    pointer-events: none;
   }
 
-  /** 步骤行：无内容时仍占一条固定高度，避免下方区域突然下跳；虚线提示可展开区域 */
+  /** 移动端：步骤条仅在有内容时显示，不再保留占位高度 */
   .solver-strip {
-    min-height: 10rem;
+    min-height: 0;
+    pointer-events: none;
   }
 
   .solver-strip:not(.solver-strip--visible) {
-    border-bottom: 1px dashed var(--hairline);
+    display: block;
+    border-bottom: none;
   }
 
   .solver-strip--visible {
     border-bottom: none;
+  }
+
+  /** 移动端：步骤条整体穿透，不遮挡魔方；仅“下一步”按钮可点 */
+  .solver-strip__content,
+  .solver-strip__panel,
+  .solver-strip__footer {
+    pointer-events: none;
+  }
+
+  .solver-strip .toolbar__btn-sm,
+  .solver-strip__footer .solver-next-btn {
+    pointer-events: auto;
   }
 
   .facelets54__input-wrap {
@@ -3690,6 +3698,8 @@ function applySelectedParityIncompleteEnumeration() {
 
 /** 首屏欢迎蒙版：Teleport 至 body，仍使用本组件 scoped */
 .splash-overlay {
+  --splash-in-dur: 2080ms;
+  --splash-in-ease: cubic-bezier(0.18, 1, 0.32, 1);
   position: fixed;
   inset: 0;
   z-index: 100000;
@@ -3805,6 +3815,79 @@ function applySelectedParityIncompleteEnumeration() {
   font-weight: 400;
   opacity: 0.48;
   letter-spacing: 0.04em;
+}
+
+/** 首屏文案入场：分层延时淡入上浮（PC 与移动端时序不同） */
+.splash-main--pc,
+.splash-main--m {
+  --splash-target-opacity: 0.8;
+}
+
+.splash-overlay__inner--pc .splash-sub,
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-sub {
+  --splash-target-opacity: 0.7;
+}
+
+.splash-hint {
+  --splash-target-opacity: 0.48;
+}
+
+.splash-overlay .splash-main--pc,
+.splash-overlay .splash-main--m,
+.splash-overlay .splash-sub,
+.splash-overlay .splash-hint {
+  opacity: 0;
+  transform: translateY(12px);
+  filter: blur(2px);
+  animation: splash-copy-in var(--splash-in-dur) var(--splash-in-ease) forwards;
+}
+
+/* PC：主标题第 1 行 -> +240ms 第 2 行 -> +240ms 副标题+hint */
+.splash-overlay__inner--pc .splash-main--pc:nth-of-type(1) {
+  animation-delay: 1000ms;
+}
+
+.splash-overlay__inner--pc .splash-main--pc:nth-of-type(2) {
+  animation-delay: 2240ms;
+}
+
+.splash-overlay__inner--pc .splash-sub,
+.splash-overlay__inner--pc .splash-hint {
+  animation-delay: 3580ms;
+}
+
+/* 移动：主标题第 1 行 -> +240ms 第 2-4 行 -> +240ms 副标题+hint */
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-main--m:nth-of-type(1) {
+  animation-delay: 1000ms;
+}
+
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-main--m:nth-of-type(n + 2) {
+  animation-delay: 2240ms;
+}
+
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-sub,
+.splash-overlay__inner:not(.splash-overlay__inner--pc) .splash-hint {
+  animation-delay: 3580ms;
+}
+
+@keyframes splash-copy-in {
+  to {
+    opacity: var(--splash-target-opacity, 1);
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-overlay .splash-main--pc,
+  .splash-overlay .splash-main--m,
+  .splash-overlay .splash-sub,
+  .splash-overlay .splash-hint {
+    animation: none;
+    opacity: var(--splash-target-opacity, 1);
+    transform: none;
+    filter: none;
+  }
 }
 
 /**
