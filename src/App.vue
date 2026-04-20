@@ -1847,7 +1847,7 @@ function applySelectedParityIncompleteEnumeration() {
 
     <div class="app-grid">
       <aside class="toolbar toolbar--left" :aria-label="t('app.aria.toolbar')">
-        <button type="button" class="toolbar__primary" @click="setSolved">{{ t('toolbar.solved') }}</button>
+        <button type="button" class="toolbar__primary" @click="setSolved">{{ t('toolbar.reset') }}</button>
         <div class="toolbar__random-wrap">
           <button
             ref="randomBtnRef"
@@ -2202,6 +2202,24 @@ function applySelectedParityIncompleteEnumeration() {
     </section>
     </template>
     </div>
+
+    <div class="app-credit" aria-label="license and source">
+      <span>MIT License </span>
+      <a
+        href="https://github.com/bimuart/cube"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="GitHub repository"
+      >
+        <svg class="app-credit__github" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.41 7.86 10.94.57.1.78-.24.78-.54 0-.27-.01-.98-.02-1.93-3.2.69-3.88-1.54-3.88-1.54-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.76 1.19 1.76 1.19 1.03 1.76 2.71 1.25 3.37.96.1-.75.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.25.45-2.26 1.18-3.06-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.14 1.17a10.9 10.9 0 0 1 5.72 0c2.18-1.48 3.14-1.17 3.14-1.17.62 1.58.23 2.75.11 3.04.73.8 1.18 1.81 1.18 3.06 0 4.41-2.69 5.39-5.25 5.67.41.35.78 1.04.78 2.1 0 1.52-.01 2.74-.01 3.11 0 .3.2.65.79.54A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"
+          />
+        </svg>
+        <span>Made with ♡ by bimuart</span>
+      </a>
+    </div>
   </div>
 </template>
 
@@ -2379,6 +2397,36 @@ function applySelectedParityIncompleteEnumeration() {
   flex-wrap: nowrap;
   align-items: center;
   gap: 0.45rem;
+}
+
+.app-credit {
+  position: fixed;
+  left: 50%;
+  bottom: max(0.38rem, env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 55;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 0.66rem;
+  color: var(--ui-muted);
+  opacity: 0.72;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.app-credit a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  color: currentColor;
+  text-decoration: none;
+}
+
+.app-credit__github {
+  width: 0.72rem;
+  height: 0.72rem;
+  display: block;
 }
 
 .app-chrome__icon {

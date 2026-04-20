@@ -14,7 +14,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'app.aria.chrome': '显示与语言',
 
     'splash.aria': '欢迎',
-    'splash.main1': '随心定义魔方配色',
+    'splash.main1': '自由填入魔方配色',
     'splash.pcMain2': '每一次填充，我们都实时确保它，真实可解',
     'splash.mMain2': '每一次填充',
     'splash.mMain3': '我们都实时确保它',
@@ -26,7 +26,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'chrome.themeToLight': '切换到日间模式',
     'chrome.lang': '界面语言',
 
-    'toolbar.solved': '还原',
+    'toolbar.reset': '重置',
     'toolbar.random': '随机',
     'toolbar.randomAll': '全部',
     'toolbar.randomRest': '未选',
@@ -117,7 +117,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'app.aria.chrome': 'Display & language',
 
     'splash.aria': 'Welcome',
-    'splash.main1': 'Define cube colors freely',
+    'splash.main1': 'Fill cube colors freely',
     'splash.pcMain2':
       'Every fill you make, every fill we verify — always solvable',
     'splash.mMain2': 'Every fill you make',
@@ -130,7 +130,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     'chrome.themeToLight': 'Switch to light mode',
     'chrome.lang': 'Interface language',
 
-    'toolbar.solved': 'Reset solved',
+    'toolbar.reset': 'Reset',
     'toolbar.random': 'Random',
     'toolbar.randomAll': 'All',
     'toolbar.randomRest': 'Rest',
