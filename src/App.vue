@@ -1138,7 +1138,7 @@ const solverStripVisible = computed(
     solutionMoves.value.length > 0,
 );
 
-const SOLUTION_AUTOPLAY_MS = 1000;
+const SOLUTION_AUTOPLAY_MS = 450;
 
 const solutionAutoplayPlaying = ref(false);
 let solutionAutoplayTimeoutId: ReturnType<typeof setTimeout> | null = null;
