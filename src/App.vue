@@ -961,6 +961,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onSolutionAutoplayGlobalKeydown);
   stopSolutionAutoplay();
   forceReleaseSplashMobileScrollLock();
+  if (prewarmAfterSplashTimer != null) {
+    clearTimeout(prewarmAfterSplashTimer);
+    prewarmAfterSplashTimer = null;
+  }
 });
 
 const solverInitialized = ref(false);
@@ -988,6 +992,12 @@ function prewarmSolverWhenIdle() {
     setTimeout(run, 0);
   }
 }
+
+const isSafariBrowser =
+  typeof navigator !== 'undefined' &&
+  /Safari/i.test(navigator.userAgent) &&
+  !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/i.test(navigator.userAgent);
+let prewarmAfterSplashTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 与 @media (max-width: 900px) 一致：窄屏时透明度滑块移到顶栏首行左侧 */
 const isMobileLayout = ref(
@@ -1087,7 +1097,6 @@ watchEffect((onCleanup) => {
 });
 
 onMounted(() => {
-  prewarmSolverWhenIdle();
   syncIsMobileLayout();
   mobileLayoutMql = window.matchMedia('(max-width: 900px)');
   mobileLayoutMql.addEventListener('change', syncIsMobileLayout);
@@ -1097,6 +1106,20 @@ onMounted(() => {
       if (splashVisible.value) splashOverlayRef.value?.focus();
     });
   });
+});
+
+watch(splashVisible, (visible) => {
+  if (visible) return;
+  if (solverInitialized.value) return;
+  if (prewarmAfterSplashTimer != null) {
+    clearTimeout(prewarmAfterSplashTimer);
+    prewarmAfterSplashTimer = null;
+  }
+  const delay = isSafariBrowser ? 3500 : 600;
+  prewarmAfterSplashTimer = setTimeout(() => {
+    prewarmAfterSplashTimer = null;
+    prewarmSolverWhenIdle();
+  }, delay);
 });
 const solverError = ref<string | null>(null);
 const solverBanner = ref<string | null>(null);
@@ -1636,6 +1659,7 @@ function applySelectedParityIncompleteEnumeration() {
           :sticker-opacity="stickerOpacity"
           :dark-scene="isDark"
           :view-aria-label="t('app.aria.cube3d')"
+          :webgl-fallback-text="t('app.err.webglUnavailable')"
           @sticker-click="onStickerClick"
           @sticker-pointer-miss="onStickerPointerMiss"
         />

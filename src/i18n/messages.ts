@@ -8,6 +8,7 @@ export const messages: Record<Locale, Record<string, string>> = {
   zh: {
     'app.title': 'Cube',
     'app.aria.cube3d': '三阶魔方三维视图，拖拽旋转视角，点击贴纸换色',
+    'app.err.webglUnavailable': '当前浏览器环境不支持 WebGL，无法显示 3D 魔方。建议使用 Chrome / Edge。',
     'app.aria.io': '面串输入与求解步骤',
     'app.aria.toolbar': '操作',
     'app.aria.side': '选色与约束',
@@ -111,6 +112,7 @@ export const messages: Record<Locale, Record<string, string>> = {
   en: {
     'app.title': 'Cube',
     'app.aria.cube3d': '3×3 cube view: drag to rotate, click stickers to paint',
+    'app.err.webglUnavailable': 'This browser environment does not support WebGL, so the 3D cube cannot be rendered. Try Chrome or Edge.',
     'app.aria.io': 'Facelet string input and solution strip',
     'app.aria.toolbar': 'Actions',
     'app.aria.side': 'Colors & constraints',

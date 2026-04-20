@@ -38,6 +38,8 @@ const props = defineProps<{
   darkScene?: boolean;
   /** 无障碍说明（由 App i18n 传入） */
   viewAriaLabel?: string;
+  /** WebGL 初始化失败时的提示文案 */
+  webglFallbackText?: string;
 }>();
 
 function clamp01(n: number): number {
@@ -51,6 +53,7 @@ const emit = defineEmits<{
 }>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
+const webglInitFailed = ref(false);
 
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
@@ -80,6 +83,10 @@ let disposeThree: (() => void) | null = null;
 /** 与 App.vue 移动端断点一致：首帧相机略拉远，等同默认视角后退一点 */
 const MOBILE_VIEWPORT_MQ = '(max-width: 900px)';
 const MOBILE_INITIAL_CAMERA_PULL = 1.3;
+const IS_SAFARI_RUNTIME =
+  typeof navigator !== 'undefined' &&
+  /Safari/i.test(navigator.userAgent) &&
+  !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/i.test(navigator.userAgent);
 
 type LightingRig = {
   ambient: THREE.AmbientLight;
@@ -648,7 +655,9 @@ function animateMove(move: string): Promise<void> {
 function resetLayout() {
   resetCellTransforms();
   for (let i = 0; i < 54; i++) {
-    stickerMeshes[i]!.userData.faceletIndex = i;
+    const mesh = stickerMeshes[i];
+    if (!mesh) continue;
+    mesh.userData.faceletIndex = i;
   }
   syncAllStickers();
 }
@@ -675,19 +684,26 @@ onMounted(() => {
   camera.position.set(3.4 * pull, 2.5 * pull, 4.6 * pull);
   camera.lookAt(0, 0, 0);
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  } catch {
+    webglInitFailed.value = true;
+    return;
+  }
+  webglInitFailed.value = false;
   renderer.setClearColor(0x000000, 0);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  /** Safari 走轻量模式：降低像素比，减少切主题/切语言等操作时的掉帧与卡顿 */
+  renderer.setPixelRatio(IS_SAFARI_RUNTIME ? 1 : Math.min(window.devicePixelRatio, 2));
   renderer.setSize(w, h);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.08;
+  renderer.toneMapping = IS_SAFARI_RUNTIME ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = IS_SAFARI_RUNTIME ? 1 : 1.08;
   el.appendChild(renderer.domElement);
 
   controls = new TrackballControls(camera, renderer.domElement);
   controls.rotateSpeed = 2.3;
-  controls.staticMoving = false;
-  controls.dynamicDampingFactor = 0.08;
+  controls.staticMoving = IS_SAFARI_RUNTIME;
+  controls.dynamicDampingFactor = IS_SAFARI_RUNTIME ? 0 : 0.08;
   /** 移动端双指仅缩放/旋转，避免手势中点漂移导致 target 偏移 */
   controls.noPan = narrow;
   controls.minDistance = 2.8;
@@ -776,7 +792,9 @@ onMounted(() => {
   ro.observe(el);
 
   /** 周期约 1s：违规红框透明度正弦闪烁 */
-  function tick() {
+  let lastRenderTs = 0;
+  const minFrameGapMs = IS_SAFARI_RUNTIME ? 1000 / 30 : 0;
+  function tick(now = performance.now()) {
     raf = requestAnimationFrame(tick);
     controls?.update();
     updateCameraRelativeDirLights();
@@ -790,6 +808,8 @@ onMounted(() => {
         borderFlashMaterial.opacity = 1;
       }
     }
+    if (minFrameGapMs > 0 && now - lastRenderTs < minFrameGapMs) return;
+    lastRenderTs = now;
     if (renderer && scene && camera) {
       renderer.render(scene, camera);
     }
@@ -891,7 +911,11 @@ watch(
     class="cube-3d"
     role="img"
     :aria-label="viewAriaLabel ?? '3×3 cube'"
-  />
+  >
+    <p v-if="webglInitFailed" class="cube-3d__fallback">
+      {{ webglFallbackText ?? 'WebGL unavailable on this browser/device.' }}
+    </p>
+  </div>
 </template>
 
 <style scoped>
@@ -902,5 +926,16 @@ watch(
   overflow: hidden;
   background: transparent;
   touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cube-3d__fallback {
+  margin: 0;
+  padding: 0 0.8rem;
+  text-align: center;
+  color: rgba(127, 127, 127, 0.88);
+  font-size: 0.82rem;
 }
 </style>
