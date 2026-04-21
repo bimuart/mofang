@@ -702,8 +702,8 @@ onMounted(() => {
 
   controls = new TrackballControls(camera, renderer.domElement);
   controls.rotateSpeed = 2.3;
-  controls.staticMoving = IS_SAFARI_RUNTIME;
-  controls.dynamicDampingFactor = IS_SAFARI_RUNTIME ? 0 : 0.08;
+  controls.staticMoving = false;
+  controls.dynamicDampingFactor = 0.08;
   /** 移动端双指仅缩放/旋转，避免手势中点漂移导致 target 偏移 */
   controls.noPan = narrow;
   controls.minDistance = 2.8;
@@ -792,9 +792,7 @@ onMounted(() => {
   ro.observe(el);
 
   /** 周期约 1s：违规红框透明度正弦闪烁 */
-  let lastRenderTs = 0;
-  const minFrameGapMs = IS_SAFARI_RUNTIME ? 1000 / 30 : 0;
-  function tick(now = performance.now()) {
+  function tick() {
     raf = requestAnimationFrame(tick);
     controls?.update();
     updateCameraRelativeDirLights();
@@ -808,8 +806,6 @@ onMounted(() => {
         borderFlashMaterial.opacity = 1;
       }
     }
-    if (minFrameGapMs > 0 && now - lastRenderTs < minFrameGapMs) return;
-    lastRenderTs = now;
     if (renderer && scene && camera) {
       renderer.render(scene, camera);
     }
